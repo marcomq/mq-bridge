@@ -135,7 +135,7 @@ once_cell = { version = "1.21" }
 # no C toolchain; the ABI itself lives in src/support/plugin_abi.rs.
 # 0.9 needs Rust 1.88+, like the amqp/mongodb/nats features.
 libloading = { version = "0.9", optional = true }
-object = { version = "0.40", default-features = false, features = ["read_core", "elf", "macho", "pe", "std"], optional = true }
+object = { version = "0.41", default-features = false, features = ["read_core", "elf", "macho", "pe", "std"], optional = true }
 # SHA-256 for hashing connection-registry identities so secret-bearing fields
 # (URL/TLS passwords) are never retained verbatim in cache keys.
 sha2 = "0.11"
@@ -272,7 +272,7 @@ zeromq = { version = "0.7", optional = true }
 # Default ZeroMQ backend (`backend: try_omq`). Faster than libzmq per its
 # benchmarks and adds CURVE/PLAIN security. Pure Rust without default
 # features; needs MSRV 1.93 / edition 2024.
-omq-tokio = { version = "0.35", optional = true }
+omq-tokio = { version = "0.36", optional = true }
 
 # Redis Streams. Pure-Rust client (no C bindings). TLS via rustls (ring), so
 # `rediss://` URLs work; webpki-roots ships the CA bundle so there's no system
