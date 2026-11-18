@@ -95,9 +95,12 @@ pub(crate) fn encode_record(
 fn escape_delimiter_in_json(record: Bytes, delimiter: &[u8]) -> Result<Bytes, serde_json::Error> {
     // Line breaks never occur raw in these records: serde escapes them in strings, and
     // `json` strips them from verbatim payloads.
-    if matches!(delimiter, [b'\n'] | [b'\r', b'\n'])
-        || memchr::memmem::find(&record, delimiter).is_none()
-    {
+    // The record's tail plus the appended delimiter must not complete it early either.
+    let framed_badly = |r: &[u8]| {
+        memchr::memmem::find(r, delimiter).is_some()
+            || (1..delimiter.len()).any(|n| r.ends_with(&delimiter[..n]))
+    };
+    if matches!(delimiter, [b'\n'] | [b'\r', b'\n']) || !framed_badly(&record) {
         return Ok(record);
     }
     let text = std::str::from_utf8(&record)
@@ -137,7 +140,7 @@ fn escape_delimiter_in_json(record: Bytes, delimiter: &[u8]) -> Result<Bytes, se
         }
     }
 
-    if memchr::memmem::find(out.as_bytes(), delimiter).is_some() {
+    if framed_badly(out.as_bytes()) {
         return Err(invalid_data(format!(
             "record contains the delimiter {:?} outside a JSON string, where it cannot be \
              escaped; use a delimiter JSON never contains, such as 0x1e",

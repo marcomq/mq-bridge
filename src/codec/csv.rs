@@ -125,16 +125,25 @@ pub(crate) fn csv_encode_row(
         }
         csv_append_field(&mut buf, f, delimiter, syntax)?;
     }
-    quote_blank_record(&mut buf, fields.len(), syntax);
+    quote_blank_record(&mut buf, fields.len(), syntax)?;
     Ok(buf)
 }
 
 /// A record of one empty field is written `""`: bare, it would be a blank line, which
-/// the reader skips.
-fn quote_blank_record(record: &mut Vec<u8>, fields: usize, syntax: CsvSyntax) {
-    if let (1, true, Some(quote)) = (fields, record.is_empty(), syntax.quote) {
-        record.extend_from_slice(&[quote, quote]);
+/// the reader skips. Without a quote character it has no spelling, so it fails.
+fn quote_blank_record(
+    record: &mut Vec<u8>,
+    fields: usize,
+    syntax: CsvSyntax,
+) -> Result<(), serde_json::Error> {
+    if fields != 1 || !record.is_empty() {
+        return Ok(());
     }
+    let quote = syntax.quote.ok_or_else(|| {
+        invalid_data("a record of one empty field is a blank line under `quote: none`".into())
+    })?;
+    record.extend_from_slice(&[quote, quote]);
+    Ok(())
 }
 
 /// Drops raw line breaks from valid JSON text. Inside a JSON string they must be
@@ -416,7 +425,7 @@ pub(crate) fn csv_encode_message(
             flatten: csv.flatten,
         };
         if csv_encode_ordered(&msg.payload, shape, row_buf) {
-            quote_blank_record(row_buf, cols.len(), syntax);
+            quote_blank_record(row_buf, cols.len(), syntax)?;
             return Ok(false);
         }
     }
@@ -460,7 +469,7 @@ pub(crate) fn csv_encode_message(
             matched += 1;
         }
     }
-    quote_blank_record(row_buf, cols.len(), syntax);
+    quote_blank_record(row_buf, cols.len(), syntax)?;
 
     // Configured `columns` are a projection: keys outside them are dropped on purpose.
     let has_extra_keys = !flattened && csv.columns.is_none() && row.len() > matched;

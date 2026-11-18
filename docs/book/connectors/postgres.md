@@ -389,6 +389,25 @@ unchanged, and the copy exits non-zero.
 - **SQLite.** `sqlite:///var/data/app.db` is an absolute path, `sqlite://app.db` a relative
   one. A sink creates the file when it does not exist.
 
+## How values are rendered
+
+A PostgreSQL row reaches JSON on three paths, and they do not render every type the same way:
+
+| Type | `sqlx` source (`cursor_column`) | `postgres_cdc`, including the `capture_all` / `snapshot` back fill | Row read by `lookup_query` / the batch redo (`to_json`) |
+|---|---|---|---|
+| `int`, `bigint`, `bool`, `text` | number, boolean, string | same | same |
+| `float8` / `real` | number; `NaN` and `Infinity` are `null` | number; `NaN` and `Infinity` are strings | number; `NaN` and `Infinity` are strings |
+| `numeric` | string | string | number |
+| `bytea` | hex string without `\x` | base64 string | `"\\x…"` string |
+| dates, timestamps | Postgres text (`timestamps: rfc3339` for RFC 3339) | Postgres text, ISO style | ISO 8601 with `T` |
+| `json` / `jsonb` | embedded | embedded | embedded |
+| arrays | JSON array (`to_jsonb`) | 1-D arrays of the common types as JSON arrays, element by element as above; others Postgres text | JSON array |
+
+A back fill spelled out by hand as a `sequence` with a `sqlx` phase keeps the `sqlx` column, so
+its rows can differ from the CDC rows that follow; `consume: capture_all` does not. A `char(n)`
+value loses its trailing spaces in a back fill, while the CDC phase keeps them. To make two
+paths agree, normalise the field with a [`transform`](../cookbook/transform.md).
+
 ## Recipes
 
 - [Upserts & insert-if-absent](../cookbook/upserts.md): `ON CONFLICT` and `ON DUPLICATE KEY`.
@@ -469,7 +488,8 @@ The payload is the row as a JSON object; the metadata names the change: `postgre
   are read as doubles too.
 - `bytea` is base64. Dates, times, `uuid` and `interval` are the text Postgres prints.
   `NaN` and `Infinity` are strings. One-dimensional arrays of the common types are JSON
-  arrays; other arrays, ranges, enums and composite types are their Postgres text.
+  arrays; other arrays, ranges, enums and composite types are their Postgres text. How
+  this compares with the other read paths: [How values are rendered](#how-values-are-rendered).
 
 Full field list: [reference/postgres-cdc.md](../reference/postgres-cdc.md).
 

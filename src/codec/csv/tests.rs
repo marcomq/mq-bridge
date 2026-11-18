@@ -155,3 +155,19 @@ fn json_append_escaped_output_is_valid_json_for_every_byte_class() {
     assert_eq!(spelled("\u{0}\u{1f}"), r"\u0000\u001f");
     assert_eq!(spelled("\u{7f}\u{2028}"), "\u{7f}\u{2028}");
 }
+
+/// One empty field is a blank line unless quoted, and the reader skips blank lines; with
+/// no quote character the record has no spelling, so it fails instead of vanishing.
+#[test]
+fn a_single_empty_field_is_quoted_or_rejected() {
+    let quoted = CsvSyntax::default();
+    assert_eq!(
+        csv_encode_row(&[String::new()], b"\n", quoted).unwrap(),
+        b"\"\""
+    );
+    let unquoted = CsvSyntax {
+        quote: None,
+        ..quoted
+    };
+    assert!(csv_encode_row(&[String::new()], b"\n", unquoted).is_err());
+}

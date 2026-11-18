@@ -10,6 +10,13 @@ All notable changes to `mq-bridge`. Newest first.
   unprefixed hex was tried first. IDs are now read as on `websocket` and `grpc` (UUID,
   `0x` hex, decimal), with unprefixed hex as the last fallback, so `ff` still reads as 255.
   A client that sends all-digit hex IDs without `0x` gets a different id now.
+- **`file` and `object_store`: a record that cannot be framed fails instead of being lost.**
+  Under `csv.quote: none`, a row of one empty field was written as a blank line, which
+  the reader skips. A `json`, `normal` or `text` record ending in the start of a
+  multi-byte delimiter (such as `}|`) completed it one byte early and was read back cut.
+- **`postgres_cdc` `capture_all`/`snapshot`: back-filled rows read like streamed ones.** The
+  snapshot rendered `bytea` as hex and `NaN`/`Infinity` as `null`, the CDC phase as base64 and
+  strings. Snapshot rows now use the CDC rendering, array elements included.
 
 ## 1.6.1
 

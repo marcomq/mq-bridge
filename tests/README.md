@@ -18,6 +18,19 @@ Use tracing with any command:
 RUST_LOG=info,mq_bridge=trace cargo test ...
 ```
 
+## Delivery contract
+
+`tests/integration/contract.rs` runs the source rows of [DELIVERY.md](../docs/DELIVERY.md) against
+real brokers: a nacked message comes back, a message held by a consumer that died comes back,
+and `message_id` is the same on the second delivery where the table says so. Each broker is one
+`test_<broker>_contract` calling `check(Contract { name, compose, input, output, stable_id,
+hop_keeps_id })`; a new broker endpoint adds one, so the table and the behaviour cannot drift
+apart. Run them with:
+
+```bash
+cargo test --test integration_test --features full,test-utils --release -- --ignored --nocapture --test-threads=1 integration::contract::
+```
+
 ## Ignored test inventory
 
 - Docker Compose aggregate suites: `tests/integration_test.rs`.

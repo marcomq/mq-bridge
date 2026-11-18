@@ -221,7 +221,7 @@ Broker sinks keep it off. NATS (both Core and JetStream) publishes a batch throu
 ### Helper Utilities
 mq-bridge provides several helper functions to make implementing batching easier, especially if your endpoint only supports single-message operations:
 
-- **`send_batch_helper`**: Calls `send` for each message in a batch and aggregates the results. Used to implement `send_batch` when only single-message sending is available.
+- **`send_batch_helper`**: Implements `send_batch` on top of a single-message `send`. It keeps up to `SEND_BATCH_CONCURRENCY` (128) sends in flight, reports results in batch order, and turns per-message failures into a partial `SentBatch` instead of failing the whole batch, so the route retries or dead-letters only the failed messages. Wire order inside one batch is not kept, unless the publisher's `requires_ordered_publish()` returns true; then it sends one message at a time. Use it rather than writing a batch loop per endpoint.
 - **`receive_batch_helper`**: Calls `receive` once and wraps the result as a batch. Used to implement `receive_batch` when only single-message receive is available.
 - **`into_commit_func`**: Converts a batch commit function (`BatchCommitFunc`) into a single-message commit function (`CommitFunc`).
 - **`into_batch_commit_func`**: Converts a single-message commit function into a batch commit function.

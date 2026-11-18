@@ -3820,6 +3820,8 @@ fn json_record_fails_when_the_delimiter_is_json_syntax() {
         error.to_string().contains("outside a JSON string"),
         "{error}"
     );
+    // The record's closing `}` and an appended `}|` would frame one byte early.
+    assert!(encode_record(&msg, &FileFormat::Json, b"}|").is_err());
     // `raw` promises the payload's bytes untouched, so it is never rewritten.
     assert_eq!(
         encode_record(&msg, &FileFormat::Raw, b",").unwrap(),

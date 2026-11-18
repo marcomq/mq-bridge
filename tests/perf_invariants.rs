@@ -38,12 +38,15 @@ static GLOBAL: Counting = Counting;
 /// Allocation counts are process-wide, so the tests here take turns.
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Counts messages and the most sends that were in flight at once; each send takes 1 ms.
+/// Counts messages and the most sends that were in flight at once. With `gate`, a lone
+/// send waits (bounded) for a second one to enter, so overlap does not hinge on timing.
 #[derive(Debug, Default)]
 struct Overlap {
     in_flight: AtomicUsize,
     max_in_flight: AtomicUsize,
     messages: AtomicUsize,
+    gate: bool,
+    entered: tokio::sync::Notify,
 }
 
 struct OverlapSink(Arc<Overlap>);
@@ -56,7 +59,15 @@ impl MessagePublisher for OverlapSink {
     ) -> Result<SentBatch, PublisherError> {
         let now = self.0.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
         self.0.max_in_flight.fetch_max(now, Ordering::SeqCst);
-        tokio::time::sleep(Duration::from_millis(1)).await;
+        self.0.entered.notify_waiters();
+        if self.0.gate {
+            let entered = self.0.entered.notified();
+            tokio::pin!(entered);
+            entered.as_mut().enable();
+            if self.0.max_in_flight.load(Ordering::SeqCst) < 2 {
+                let _ = tokio::time::timeout(Duration::from_secs(5), entered).await;
+            }
+        }
         self.0.messages.fetch_add(messages.len(), Ordering::SeqCst);
         self.0.in_flight.fetch_sub(1, Ordering::SeqCst);
         Ok(SentBatch::Ack)
@@ -89,8 +100,11 @@ impl CustomEndpointFactory for OverlapFactory {
     }
 }
 
-fn overlap_sink(name: &str) -> (Endpoint, Arc<Overlap>) {
-    let overlap = Arc::new(Overlap::default());
+fn overlap_sink(name: &str, gate: bool) -> (Endpoint, Arc<Overlap>) {
+    let overlap = Arc::new(Overlap {
+        gate,
+        ..Default::default()
+    });
     register_endpoint_factory(name, Arc::new(OverlapFactory(Arc::clone(&overlap)))).unwrap();
     let endpoint = Endpoint::new(EndpointType::Custom {
         name: name.to_string(),
@@ -131,7 +145,7 @@ fn probe_delta(name: &'static str) -> impl Fn() -> u64 {
 async fn a_large_batch_decodes_and_transforms_in_parallel() {
     let _serial = SERIAL.lock().await;
     let dir = tempfile::tempdir().unwrap();
-    let (sink, overlap) = overlap_sink("perf_parallel_decode");
+    let (sink, overlap) = overlap_sink("perf_parallel_decode", false);
     let decode = probe_delta("file.decode.parallel");
     let middleware = probe_delta("map_messages.parallel");
     let transform: Middleware =
@@ -162,7 +176,7 @@ async fn a_large_batch_decodes_and_transforms_in_parallel() {
 async fn a_small_file_batch_decodes_sequentially() {
     let _serial = SERIAL.lock().await;
     let dir = tempfile::tempdir().unwrap();
-    let (sink, overlap) = overlap_sink("perf_sequential_decode");
+    let (sink, overlap) = overlap_sink("perf_sequential_decode", false);
     let sequential = probe_delta("file.decode.sequential");
 
     let route = Route::new(jsonl_source(&dir, 64), sink).with_batch_size(16);
@@ -181,7 +195,7 @@ async fn concurrency_overlaps_sends_and_one_keeps_them_serial() {
     for (concurrency, expect_overlap) in [(8, true), (1, false)] {
         let dir = tempfile::tempdir().unwrap();
         let name = format!("perf_overlap_{concurrency}");
-        let (sink, overlap) = overlap_sink(&name);
+        let (sink, overlap) = overlap_sink(&name, expect_overlap);
 
         let route = Route::new(jsonl_source(&dir, 512), sink)
             .with_batch_size(8)
@@ -208,7 +222,7 @@ async fn allocations_per_message(transform: bool) -> usize {
     for lines in [1024, 3072] {
         let dir = tempfile::tempdir().unwrap();
         let name = format!("perf_alloc_{transform}_{lines}");
-        let (sink, overlap) = overlap_sink(&name);
+        let (sink, overlap) = overlap_sink(&name, false);
         let mut source = jsonl_source(&dir, lines);
         if transform {
             source = source.add_middleware(
