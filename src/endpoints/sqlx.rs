@@ -175,20 +175,24 @@ fn build_sqlx_url_with_tls(config: &SqlxConfig) -> anyhow::Result<String> {
 
 /// Whether the URL itself makes the driver refuse an unencrypted connection. The drivers'
 /// defaults (`sslmode=prefer`, `ssl-mode=PREFERRED`) fall back to plain text, so they do not count.
-/// An option only counts for the driver that reads it.
+/// An option only counts for the driver that reads it, and a repeated one as its last value,
+/// which is the one the driver applies.
 fn url_enforces_tls(url: &url::Url) -> bool {
     let scheme = url.scheme();
-    url.query_pairs().any(|(key, value)| {
-        let value = value.to_ascii_lowercase();
-        match (scheme, key.to_ascii_lowercase().as_str()) {
-            (
-                "postgres" | "postgresql" | "mysql" | "mariadb",
-                "sslmode" | "ssl-mode" | "ssl_mode",
-            ) => value.starts_with("verify") || value.starts_with("require"),
-            ("mssql" | "sqlserver", "encrypt") => value == "true" || value == "strict",
-            _ => false,
-        }
-    })
+    url.query_pairs()
+        .filter_map(|(key, value)| {
+            let value = value.to_ascii_lowercase();
+            match (scheme, key.to_ascii_lowercase().as_str()) {
+                (
+                    "postgres" | "postgresql" | "mysql" | "mariadb",
+                    "sslmode" | "ssl-mode" | "ssl_mode",
+                ) => Some(value.starts_with("verify") || value.starts_with("require")),
+                ("mssql" | "sqlserver", "encrypt") => Some(value == "true" || value == "strict"),
+                _ => None,
+            }
+        })
+        .last()
+        .unwrap_or(false)
 }
 
 /// For a SQLite sink whose file does not exist and whose URL names no `mode`: the URL
@@ -275,6 +279,7 @@ async fn create_shared_sqlx_pool(config: &SqlxConfig) -> anyhow::Result<std::syn
             config.acquire_timeout_ms,
             config.idle_timeout_ms,
             config.max_lifetime_ms,
+            config.test_before_acquire.unwrap_or(false),
         ),
     ));
     let config_clone = config.clone();
@@ -456,11 +461,15 @@ fn copy_escape_text(s: &str) -> String {
 ///     `42804` datatype_mismatch (text bound into a `numeric`/`timestamptz` column).
 ///   - `22` data exception — invalid text representation, numeric overflow, bad datetime.
 ///   - `23` integrity constraint violation (also caught by `ErrorKind` below).
+///   - `21` cardinality violation, e.g. one upsert batch updating the same key twice.
 ///
 /// Everything else (08 connection, 40 deadlock/serialization, 53 resources,
 /// 55 object-not-ready, 57 operator-intervention, 58 system) is transient and retried.
 fn is_deterministic_sqlstate(code: &str) -> bool {
-    matches!(&code.get(..2), Some("42") | Some("22") | Some("23"))
+    matches!(
+        &code.get(..2),
+        Some("42") | Some("22") | Some("23") | Some("21")
+    )
 }
 
 /// Classifies a SQL error as deterministic (dead-letter) vs transient (retry).
@@ -562,7 +571,11 @@ fn classify_queue_read_error(e: sqlx::Error) -> ConsumerError {
     }
 }
 
-fn extract_copy_columns(raw_query: &str, token_count: usize) -> anyhow::Result<Vec<String>> {
+/// The INSERT target and its column list, for a COPY into the same table as single-row sends.
+fn extract_copy_columns(
+    raw_query: &str,
+    token_count: usize,
+) -> anyhow::Result<(String, Vec<String>)> {
     let upper = raw_query.to_uppercase();
     if upper.contains("ON CONFLICT")
         || upper.contains("RETURNING")
@@ -585,6 +598,12 @@ fn extract_copy_columns(raw_query: &str, token_count: usize) -> anyhow::Result<V
             "bulk_copy requires an explicit column list, e.g. INSERT INTO t (a, b) VALUES (...)."
         )
     })?;
+    let target = prefix[..open]
+        .to_ascii_uppercase()
+        .find("INTO")
+        .map(|into| prefix[into + "INTO".len()..open].trim().to_string())
+        .filter(|target| !target.is_empty())
+        .ok_or_else(|| anyhow!("bulk_copy: could not find the INSERT INTO table."))?;
     let close = prefix[open..]
         .find(')')
         .map(|off| open + off)
@@ -623,8 +642,18 @@ fn extract_copy_columns(raw_query: &str, token_count: usize) -> anyhow::Result<V
             "bulk_copy requires every VALUES entry to be a single `${{...}}` token (no literals, expressions, or functions)."
         ));
     }
+    if !after[vclose + 1..]
+        .trim()
+        .trim_end_matches(';')
+        .trim()
+        .is_empty()
+    {
+        return Err(anyhow!(
+            "bulk_copy requires a single VALUES tuple and nothing after it."
+        ));
+    }
 
-    Ok(columns)
+    Ok((target, columns))
 }
 
 impl SqlxPublisher {
@@ -762,10 +791,10 @@ impl SqlxPublisher {
                     "bulk_copy requires a token-based insert_query (e.g. INSERT INTO t (a, b) VALUES (${{payload:a}}, ${{payload:b}})); single-payload COPY is not supported."
                 ));
             }
-            let columns = extract_copy_columns(&raw_insert_query, column_sources.len())?;
+            let (table, columns) = extract_copy_columns(&raw_insert_query, column_sources.len())?;
             Some(PgCopySink {
                 pool: open_copy_pool(config).await?,
-                table: config.table.clone(),
+                table,
                 columns,
                 sources: column_sources.clone(),
             })
@@ -783,8 +812,35 @@ impl SqlxPublisher {
     }
 }
 
+/// Healthy only if a pooled connection still answers: the pool hands out an idle one the
+/// server has closed unless `test_before_acquire` is set.
+async fn pool_health(pool: &AnyPool) -> (bool, Option<String>) {
+    use sqlx::Connection;
+    let answered = match pool.acquire().await {
+        Ok(mut conn) => conn.ping().await,
+        Err(e) => Err(e),
+    };
+    match answered {
+        Ok(()) => (true, None),
+        Err(e) => (false, Some(e.to_string())),
+    }
+}
+
 fn invalid(message: impl std::fmt::Display) -> anyhow::Error {
     anyhow!(crate::errors::InvalidConfig(anyhow!("{message}")))
+}
+
+/// `n` bind placeholders for an `IN (...)` list. Built by hand because the `Any` driver
+/// does not rewrite `?` to `$N` for PostgreSQL here.
+fn id_placeholders(driver_name: &str, n: usize) -> String {
+    (1..=n)
+        .map(|i| match driver_name {
+            "PostgreSQL" => format!("${i}"),
+            "Microsoft SQL Server" => format!("@p{i}"),
+            _ => "?".to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Creates the default `payload` table and its `locked_until` index; a failure only warns,
@@ -918,10 +974,7 @@ impl MessagePublisher for SqlxPublisher {
     }
 
     async fn status(&self) -> EndpointStatus {
-        let (healthy, error) = match self.pool.acquire().await {
-            Ok(_) => (true, None),
-            Err(e) => (false, Some(e.to_string())),
-        };
+        let (healthy, error) = pool_health(&self.pool).await;
 
         EndpointStatus {
             healthy,
@@ -1037,6 +1090,13 @@ impl SqlxPublisher {
         // handles these correctly.
         if binds_after_values(values_suffix) {
             warn!("insert_query binds a value after the VALUES tuple. Falling back to iterative inserts.");
+            return self.send_batch_iterative(messages, held).await;
+        }
+        // A further tuple is part of every single-row insert; the rebuild would write it once.
+        if values_suffix.trim_start().starts_with(',') {
+            warn!(
+                "insert_query has more than one VALUES tuple. Falling back to iterative inserts."
+            );
             return self.send_batch_iterative(messages, held).await;
         }
 
@@ -1540,6 +1600,7 @@ impl MessageConsumer for SqlxConsumer {
                     return Ok(());
                 }
                 let mut ids_to_ack = Vec::new();
+                let mut ids_to_release = Vec::new();
                 for (i, disp) in dispositions.iter().enumerate() {
                     let should_ack = match disp {
                         MessageDisposition::Ack => true,
@@ -1550,31 +1611,33 @@ impl MessageConsumer for SqlxConsumer {
                         MessageDisposition::Nack => false,
                     };
 
-                    if should_ack {
-                        if let Some(id) = ids.get(i) {
+                    if let Some(id) = ids.get(i) {
+                        if should_ack {
                             ids_to_ack.push(*id);
+                        } else {
+                            ids_to_release.push(*id);
                         }
                     }
                 }
 
-                if !ids_to_ack.is_empty() {
-                    // Manually construct the query with appropriate placeholders
-                    // because sqlx::QueryBuilder with the `Any` driver does not
-                    // correctly rewrite `?` to `$N` for PostgreSQL in this context.
-                    let mut placeholders = String::new();
-                    for i in 0..ids_to_ack.len() {
-                        if i > 0 {
-                            placeholders.push_str(", ");
-                        }
-                        match driver_name.as_str() {
-                            "PostgreSQL" => placeholders.push_str(&format!("${}", i + 1)),
-                            "Microsoft SQL Server" => {
-                                placeholders.push_str(&format!("@p{}", i + 1))
-                            }
-                            _ => placeholders.push('?'),
-                        }
+                // A nacked row is read again at once instead of after its lock expires.
+                if !ids_to_release.is_empty() {
+                    let sql = format!(
+                        "UPDATE {} SET locked_until = NULL WHERE id IN ({})",
+                        table,
+                        id_placeholders(&driver_name, ids_to_release.len())
+                    );
+                    let mut query = sqlx::query(audited_sql(&sql)).persistent(false);
+                    for id in &ids_to_release {
+                        query = query.bind(*id);
                     }
+                    if let Err(e) = query.execute(&pool).await {
+                        warn!(error = %e, "Failed to release nacked rows; they are read again once their lock expires");
+                    }
+                }
 
+                if !ids_to_ack.is_empty() {
+                    let placeholders = id_placeholders(&driver_name, ids_to_ack.len());
                     let sql = format!("DELETE FROM {} WHERE id IN ({})", table, placeholders);
 
                     let mut attempts = 0;

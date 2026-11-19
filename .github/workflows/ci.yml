@@ -142,7 +142,7 @@ jobs:
 #        run: cargo test --lib --features=full -- --ignored --nocapture
 
       - name: Run non-Docker integration tests
-        run: cargo test --test ref_test --test sqlite_test --test tls_example --test websocket_test --features=full
+        run: cargo test --test ref_test --test sqlite_test --test tls_example --test websocket_test --test perf_invariants --features=full
 
       - name: C plugin header is current and a C plugin loads
         run: cargo test -p mq-bridge-plugin-fixture --test plugin_c_header --test plugin_c_abi

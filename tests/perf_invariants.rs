@@ -3,6 +3,7 @@
 // and stable enough for every CI run. A failure here means a fast path silently vanished.
 #![cfg(feature = "file")]
 
+use mq_bridge::endpoints::create_publisher_from_route;
 use mq_bridge::extensions::register_endpoint_factory;
 use mq_bridge::models::{Endpoint, EndpointType, FileConfig, Middleware};
 use mq_bridge::support::probe;
@@ -45,7 +46,9 @@ struct Overlap {
     in_flight: AtomicUsize,
     max_in_flight: AtomicUsize,
     messages: AtomicUsize,
+    calls: AtomicUsize,
     gate: bool,
+    ordered: bool,
     entered: tokio::sync::Notify,
 }
 
@@ -69,8 +72,13 @@ impl MessagePublisher for OverlapSink {
             }
         }
         self.0.messages.fetch_add(messages.len(), Ordering::SeqCst);
+        self.0.calls.fetch_add(1, Ordering::SeqCst);
         self.0.in_flight.fetch_sub(1, Ordering::SeqCst);
         Ok(SentBatch::Ack)
+    }
+
+    fn requires_ordered_publish(&self) -> bool {
+        self.0.ordered
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -101,10 +109,17 @@ impl CustomEndpointFactory for OverlapFactory {
 }
 
 fn overlap_sink(name: &str, gate: bool) -> (Endpoint, Arc<Overlap>) {
-    let overlap = Arc::new(Overlap {
-        gate,
-        ..Default::default()
-    });
+    sink_with(
+        name,
+        Overlap {
+            gate,
+            ..Default::default()
+        },
+    )
+}
+
+fn sink_with(name: &str, overlap: Overlap) -> (Endpoint, Arc<Overlap>) {
+    let overlap = Arc::new(overlap);
     register_endpoint_factory(name, Arc::new(OverlapFactory(Arc::clone(&overlap)))).unwrap();
     let endpoint = Endpoint::new(EndpointType::Custom {
         name: name.to_string(),
@@ -252,5 +267,146 @@ async fn a_file_route_stays_within_its_allocation_budget() {
     assert!(
         transformed <= 12,
         "transform: {transformed} allocations per message"
+    );
+}
+
+/// Every output middleware that does not merge messages, with a config that passes all through.
+fn passthrough_output_middlewares() -> Vec<(&'static str, serde_json::Value)> {
+    use serde_json::json;
+    #[allow(unused_mut)]
+    let mut list = vec![
+        ("retry", json!({"retry": {}})),
+        ("dlq", json!({"dlq": {"endpoint": {"null": null}}})),
+        (
+            "transform",
+            json!({"transform": {"mapping": {"id": "$.id"}}}),
+        ),
+        (
+            "limiter",
+            json!({"limiter": {"messages_per_second": 10_000_000}}),
+        ),
+        ("delay", json!({"delay": {"delay_ms": 1}})),
+        ("timeout", json!({"timeout": {"timeout_ms": 5000}})),
+        ("cookie_jar", json!({"cookie_jar": {}})),
+        (
+            "lookup",
+            json!({"lookup": {"from": {"static": {"body": "{\"tier\":\"gold\"}", "raw": true}}, "into": "customer"}}),
+        ),
+        ("parallel", json!({"parallel": {}})),
+    ];
+    #[cfg(feature = "filter")]
+    list.push(("filter", json!({"filter": "id >= 0"})));
+    #[cfg(feature = "encryption")]
+    list.push((
+        "encryption",
+        json!({"encryption": {"key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}),
+    ));
+    #[cfg(feature = "compression")]
+    list.push(("compression", json!({"compression": {"algorithm": "zstd"}})));
+    #[cfg(feature = "metrics")]
+    list.push(("metrics", json!({"metrics": {}})));
+    #[cfg(feature = "otel")]
+    list.push(("otel", json!({"otel": {}})));
+    #[cfg(feature = "aggregate")]
+    list.push((
+        "aggregate",
+        json!({"aggregate": {"consistency": "single_writer", "key": "${payload:id}", "into": "agg",
+            "expression": "{ count: (state.count ?? 0) + 1 }"}}),
+    ));
+    list
+}
+
+fn middleware(config: &serde_json::Value) -> Middleware {
+    serde_json::from_value(config.clone()).unwrap()
+}
+
+/// A middleware that turns one batch into many sends silently costs a round trip per message.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_output_middleware_hands_the_sink_whole_batches() {
+    let _serial = SERIAL.lock().await;
+    let mut split = Vec::new();
+    for (name, config) in passthrough_output_middlewares() {
+        let dir = tempfile::tempdir().unwrap();
+        let route_name = format!("perf_whole_{name}");
+        let (sink, overlap) = overlap_sink(&route_name, false);
+        let route = Route::new(
+            jsonl_source(&dir, 256),
+            sink.add_middleware(middleware(&config)),
+        )
+        .with_batch_size(32);
+        drain(route, &route_name).await;
+
+        let messages = overlap.messages.load(Ordering::SeqCst);
+        let calls = overlap.calls.load(Ordering::SeqCst);
+        if messages != 256 || calls != 8 {
+            split.push(format!("{name}: {messages} messages in {calls} sends"));
+        }
+    }
+    assert!(
+        split.is_empty(),
+        "expected 256 messages in 8 sends: {split:#?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn buffer_and_pack_never_send_more_often_than_batches_arrive() {
+    let _serial = SERIAL.lock().await;
+    for (name, config, expect_messages) in [
+        (
+            "buffer",
+            serde_json::json!({"buffer": {"max_messages": 64, "max_delay_ms": 5}}),
+            256,
+        ),
+        ("pack", serde_json::json!({"pack": {}}), 8),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let route_name = format!("perf_merge_{name}");
+        let (sink, overlap) = overlap_sink(&route_name, false);
+        let route = Route::new(
+            jsonl_source(&dir, 256),
+            sink.add_middleware(middleware(&config)),
+        )
+        .with_batch_size(32);
+        drain(route, &route_name).await;
+
+        assert_eq!(
+            overlap.messages.load(Ordering::SeqCst),
+            expect_messages,
+            "{name}"
+        );
+        let calls = overlap.calls.load(Ordering::SeqCst);
+        assert!(calls <= 8, "{name}: 8 batches became {calls} sends");
+    }
+}
+
+/// An order-sensitive sink loses its sequencing if a wrapper forgets to forward the flag.
+#[tokio::test]
+async fn every_output_middleware_keeps_the_sink_ordered() {
+    let mut list = passthrough_output_middlewares();
+    list.push((
+        "buffer",
+        serde_json::json!({"buffer": {"max_messages": 64, "max_delay_ms": 5}}),
+    ));
+    list.push(("pack", serde_json::json!({"pack": {}})));
+    let mut lost = Vec::new();
+    for (name, config) in list {
+        let (sink, _) = sink_with(
+            &format!("perf_ordered_{name}"),
+            Overlap {
+                ordered: true,
+                ..Default::default()
+            },
+        );
+        let endpoint = sink.add_middleware(middleware(&config));
+        let publisher = create_publisher_from_route(&format!("perf_ordered_{name}"), &endpoint)
+            .await
+            .unwrap_or_else(|e| panic!("{name}: {e:#}"));
+        if !publisher.requires_ordered_publish() {
+            lost.push(name);
+        }
+    }
+    assert!(
+        lost.is_empty(),
+        "these drop requires_ordered_publish: {lost:?}"
     );
 }

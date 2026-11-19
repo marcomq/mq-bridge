@@ -307,6 +307,15 @@ pub(super) fn resolve_source(
                 if let Some(i) = n.as_i64() {
                     BindValue::Int(i)
                 } else if let Some(f) = n.as_f64() {
+                    if n.is_u64() {
+                        static WARNED: std::sync::atomic::AtomicBool =
+                            std::sync::atomic::AtomicBool::new(false);
+                        if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                            warn!(
+                                "`${{payload:{field}}}` is an integer above the BIGINT range and binds as a rounded float. Use `columns: auto` to keep it exact. Further occurrences are not logged."
+                            );
+                        }
+                    }
                     BindValue::Float(f)
                 } else {
                     BindValue::Null

@@ -310,6 +310,11 @@ fn sqlite_decltype_is_any_safe(decl_type: &str) -> bool {
 pub(super) const SQLITE_COLUMN_TYPES_SQL: &str =
     "SELECT name AS name, LOWER(type) AS typname FROM pragma_table_info(?, ?) ORDER BY cid";
 
+/// The columns a reader projects: `table_xinfo` adds the generated ones; `hidden = 1` is a
+/// virtual table's hidden column.
+const SQLITE_READ_COLUMN_TYPES_SQL: &str = "SELECT name AS name, LOWER(type) AS typname \
+     FROM pragma_table_xinfo(?, ?) WHERE hidden <> 1 ORDER BY cid";
+
 /// `$1::regclass` resolves the (optionally schema-qualified) table name against the current
 /// search_path. `pg_attribute.attname`/`pg_type.typname` are Postgres `name`-typed columns,
 /// which `Any` cannot decode directly (distinct from `text`), so cast them explicitly.
@@ -408,7 +413,7 @@ async fn build_cursor_projection(
                 None => ("main".to_string(), table.trim_matches('"').to_string()),
             };
             (
-                SQLITE_COLUMN_TYPES_SQL,
+                SQLITE_READ_COLUMN_TYPES_SQL,
                 vec![name, schema],
                 sqlite_decltype_is_any_safe,
                 |ident| format!("CAST({ident} AS TEXT) AS {ident}"),
@@ -798,8 +803,8 @@ async fn pg_xmin_readable(pool: &AnyPool, table: &str) -> bool {
     }
 }
 
-/// Ends a page before the first row written by a transaction no older than the oldest one
-/// still open: that one may yet commit a lower cursor value, which `col > last` would skip.
+/// Ends a page before the first row written by a transaction no older than the oldest open one
+/// that has written: it may yet commit a lower cursor value, which `col > last` would skip.
 /// Only the page window is checked, so the cost stays one page.
 ///
 /// `ARRAY(...)` runs the window once as an InitPlan; its lowest value (a NULL first) cuts the
@@ -1130,6 +1135,10 @@ impl MessageConsumer for SqlxCursorReader {
                 if self.rows_hidden_by_open_transaction(last.as_ref()).await? {
                     continue;
                 }
+                // A nack rewound the cursor during the wait: read again from there.
+                if self.position.lock().unwrap().epoch != epoch {
+                    continue;
+                }
                 self.hidden_rows_warned = false;
                 return Ok(ReceivedBatch {
                     messages: Vec::new(),
@@ -1244,10 +1253,7 @@ impl MessageConsumer for SqlxCursorReader {
     }
 
     async fn status(&self) -> EndpointStatus {
-        let (healthy, error) = match self.pool.acquire().await {
-            Ok(_) => (true, None),
-            Err(e) => (false, Some(e.to_string())),
-        };
+        let (healthy, error) = super::pool_health(&self.pool).await;
         EndpointStatus {
             healthy,
             target: self.table.clone(),

@@ -11,6 +11,9 @@
 //! MQB_TEST_BACKEND=kafka cargo test -p mq-bridge-app \
 //!     --test cli_scenario_docker_test -- --ignored --test-threads=1 kafka
 //! ```
+//!
+//! `MQB_TEST_BIN=/path/to/mq-bridge-app` runs the scenarios against another build,
+//! such as an older release.
 #![cfg(unix)]
 
 use std::collections::BTreeSet;

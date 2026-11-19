@@ -138,8 +138,11 @@ last value read:
 - A row that appears later with a smaller value is never read. This happens with a sequence
   when a long transaction commits after a shorter one that took a higher number. On
   PostgreSQL the reader stops each page before the first row written by a transaction that
-  is not older than every open one, so a sequence column is safe; while a write transaction
-  stays open anywhere on the server, newer rows wait for it. A column filled from `now()`
+  is not older than every open one; while a write transaction stays open anywhere on the
+  server, newer rows wait for it. The guard sees a transaction only from its first write, so
+  a sequence number drawn earlier (a `nextval()` in a previous statement, or the moment inside
+  the `INSERT` before the row is written) can still be skipped; that window is small when the
+  `INSERT` itself draws the number. A column filled from `now()`
   (the transaction's start time) or by the application can still go wrong, and so can a view,
   which has no `xmin` (the reader logs a warning). On MySQL, MariaDB and SQLite there is no
   such guard. Where writers run concurrently, prefer [PostgreSQL CDC](#postgresql-cdc).
@@ -199,8 +202,9 @@ work:
 
 - The source claims a batch of rows for 60 seconds (`locked_until`) and skips rows another
   consumer has claimed, so several consumers can share one table.
-- With `delete_after_read: true` an acknowledged row is deleted. A row that failed stays and
-  is delivered again when its claim ends.
+- With `delete_after_read: true` an acknowledged row is deleted. A nacked row is released
+  and delivered again at once; a row held by a consumer that died is delivered again when
+  its claim ends.
 - **Set `delete_after_read: true` for a queue.** Without it a row is only hidden for the
   60 seconds of its claim: nothing marks it as done, so it is delivered again and again, once
   a minute, for as long as the route runs. The default is off so that a route deletes nothing

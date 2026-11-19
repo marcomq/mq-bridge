@@ -26,6 +26,11 @@ fn only_an_enforcing_ssl_mode_counts_as_encrypted() {
     assert!(!enforces("postgres://db/app"));
     assert!(!enforces("postgres://db/app?sslmode=prefer"));
     assert!(!enforces("mysql://db/app?ssl-mode=PREFERRED"));
+    // The driver applies the last value of a repeated option.
+    assert!(!enforces(
+        "mysql://db/app?ssl-mode=REQUIRED&ssl-mode=PREFERRED"
+    ));
+    assert!(enforces("postgres://db/app?sslmode=prefer&sslmode=require"));
     // An option another driver reads does not encrypt this one.
     assert!(!enforces("postgres://db/app?encrypt=true"));
     assert!(!enforces("mysql://db/app?encrypt=strict"));
@@ -41,11 +46,12 @@ fn copy_escape_text_escapes_control_chars() {
 
 #[test]
 fn extract_copy_columns_accepts_token_only_tuple() {
-    let cols = extract_copy_columns(
+    let (table, cols) = extract_copy_columns(
             "INSERT INTO orders (sku, qty, cust) VALUES (${payload:sku}, ${payload:qty}, ${metadata:cust})",
             3,
         )
         .unwrap();
+    assert_eq!(table, "orders");
     assert_eq!(cols, vec!["sku", "qty", "cust"]);
 }
 
@@ -62,6 +68,8 @@ fn extract_copy_columns_rejects_on_conflict_and_literals() {
     assert!(extract_copy_columns("INSERT INTO t (a, b) VALUES (${payload:a}, now())", 2,).is_err());
     // Column count must match the token count.
     assert!(extract_copy_columns("INSERT INTO t (a, b) VALUES (${payload:a})", 1).is_err());
+    // COPY writes one row per message; a second tuple would be dropped.
+    assert!(extract_copy_columns("INSERT INTO t (a) VALUES (${payload:a}), ('audit')", 1).is_err());
 }
 
 async fn setup_db_file() -> (tempfile::TempDir, String) {
@@ -799,7 +807,7 @@ fn test_resolve_source_f64_bit_exact() {
 fn test_deterministic_sqlstate_classification() {
     // Deterministic (dead-letter, never retry): syntax/type, data-exception, integrity.
     for code in [
-        "42804", "42601", "42703", "42P01", "22P02", "22003", "23505",
+        "42804", "42601", "42703", "42P01", "22P02", "22003", "23505", "21000",
     ] {
         assert!(
             is_deterministic_sqlstate(code),
@@ -2797,5 +2805,58 @@ async fn load_mode_route_commits_a_drain_and_needs_exit_on_empty() {
         loaded_rows(&pool).await,
         ["a", "b"],
         "a rejected row rolls the load back"
+    );
+}
+
+#[tokio::test]
+async fn test_sqlx_cursor_reader_emits_generated_columns() {
+    let (_dir, url, pool) = setup_arbitrary_table(0).await;
+    sqlx::query(
+        "CREATE TABLE priced (id INTEGER PRIMARY KEY, price INTEGER, \
+         doubled INTEGER GENERATED ALWAYS AS (price * 2) VIRTUAL)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO priced (id, price) VALUES (1, 21)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let config = SqlxConfig {
+        url,
+        table: "priced".to_string(),
+        cursor_column: Some("id".to_string()),
+        ..Default::default()
+    };
+    let mut reader = SqlxCursorReader::new(&config).await.unwrap();
+    let batch = reader.receive_batch(10).await.unwrap();
+    let row: serde_json::Value = serde_json::from_slice(&batch.messages[0].payload).unwrap();
+    assert_eq!(row["doubled"], 42, "{row}");
+}
+
+#[tokio::test]
+async fn test_sqlx_batch_keeps_every_values_tuple_per_message() {
+    let (_dir, url, pool) = setup_arbitrary_table(0).await;
+    sqlx::query("CREATE TABLE tagged (v TEXT)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let config = SqlxConfig {
+        url,
+        table: "tagged".to_string(),
+        insert_query: Some("INSERT INTO tagged (v) VALUES (${payload:v}), ('audit')".to_string()),
+        ..Default::default()
+    };
+    let publisher = SqlxPublisher::new(&config).await.unwrap();
+    let messages =
+        ["a", "b"].map(|v| CanonicalMessage::new(format!(r#"{{"v":"{v}"}}"#).into_bytes(), None));
+    publisher.send_batch(messages.to_vec()).await.unwrap();
+    let audits: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tagged WHERE v = 'audit'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        audits, 2,
+        "one audit row per message, as single sends write"
     );
 }

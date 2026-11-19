@@ -39,7 +39,7 @@ Routes handle graceful shutdown via `shutdown_rx` channel. The `select!` macro c
 
 - **Unit tests**: In each module
 - **Integration tests**: `tests/integration/` - require Docker services (Compose files in `tests/integration/docker-compose/`)
-- **Delivery contract**: `tests/integration/contract.rs` checks a broker source against its row in [DELIVERY.md](docs/DELIVERY.md) (nack redelivers, a dead consumer's messages come back, `message_id` stability). A new broker endpoint adds a `test_<broker>_contract` calling `check(Contract { .. })`
+- **Delivery contract**: `tests/integration/contract.rs` checks a broker source against its row in [DELIVERY.md](docs/DELIVERY.md) (nack redelivers, a dead consumer's messages come back, `message_id` stability, order, a refusing sink). A new broker endpoint adds a `test_<broker>_contract` calling `check(Contract::new(..))`
 - **Performance tests**: `tests/performance_pipeline.rs` and `benches/performance_bench.rs`
 - **Memory tests**: `tests/memory_test.rs` - no external dependencies
 

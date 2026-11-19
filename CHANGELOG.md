@@ -17,6 +17,27 @@ All notable changes to `mq-bridge`. Newest first.
 - **`postgres_cdc` `capture_all`/`snapshot`: back-filled rows read like streamed ones.** The
   snapshot rendered `bytea` as hex and `NaN`/`Infinity` as `null`, the CDC phase as base64 and
   strings. Snapshot rows now use the CDC rendering, array elements included.
+- **`kafka`: a nack no longer replays the acks before it.** A batch with any nack committed
+  nothing, so messages acked ahead of the nack were delivered again. Each partition now
+  commits up to its first nack before the consumer reconnects.
+- **`sqlx` queue table: a nacked row is read again at once.** It stayed locked until
+  `locked_until` expired, 60 seconds later. A consumer that dies still waits for the lock.
+- **`mqtt`: acks committed right before a consumer closes reach the broker.** The event loop
+  stopped 100 ms after the consumer closed, or at once when a message arrived meanwhile, so
+  queued PUBACKs could be lost and the broker delivered those messages again. It now runs
+  until every queued ack is written, for up to 2 seconds.
+- **`sqlx` sink: an `insert_query` with a second `VALUES` tuple keeps it per message.** A
+  batch wrote `INSERT … VALUES (${payload:v}), ('audit')` with one `audit` row in total; it
+  now falls back to one insert per message. `bulk_copy` rejects such a query, and copies into
+  the `insert_query`'s table instead of `table` when the two differ.
+- **`sqlx` sink: an upsert batch that updates one key twice is written message by message.**
+  PostgreSQL rejects it (SQLSTATE `21000`), which was retried unchanged and failed again.
+- **`sqlx` cursor reader on SQLite: generated columns are part of the row.**
+- **`sqlx` cursor reader: a nack during the idle wait is read again before an empty batch.**
+  The empty batch could end an `exit_on_empty` route with the rewound rows unread.
+- **`sqlx`: `status` checks the connection with a ping.** A connection the server had closed
+  was reported healthy. Pools differing only in `test_before_acquire` are no longer shared,
+  and a repeated `sslmode` counts by its last value, as the driver applies it.
 
 ## 1.6.1
 
