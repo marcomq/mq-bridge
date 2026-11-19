@@ -544,8 +544,16 @@ fn classify_sql_error(e: sqlx::Error) -> PublisherError {
 /// so the route fails fast instead of reconnecting every `reconnect_interval_ms`
 /// forever on an unrecoverable read. Everything else stays `Connection`
 /// (retryable) so restarts/failovers recover without losing messages.
+///
+/// SQLSTATE `21000` (a subquery returning more than one row) depends on the rows a
+/// continuous read sees, so it reconnects until the data changes, at the cost of
+/// reconnecting forever on a query that is wrong for every row.
 fn classify_sql_consumer_error(e: sqlx::Error) -> ConsumerError {
-    if sql_error_is_deterministic(&e) {
+    let cardinality = e
+        .as_database_error()
+        .and_then(|db_err| db_err.code())
+        .is_some_and(|code| code == "21000");
+    if sql_error_is_deterministic(&e) && !cardinality {
         ConsumerError::Permanent(sql_error_text(e))
     } else {
         ConsumerError::Connection(sql_error_text(e))
@@ -601,7 +609,12 @@ fn extract_copy_columns(
     let target = prefix[..open]
         .to_ascii_uppercase()
         .find("INTO")
-        .map(|into| prefix[into + "INTO".len()..open].trim().to_string())
+        .map(|into| prefix[into + "INTO".len()..open].trim())
+        // COPY takes no alias: `INSERT INTO t AS x (..)` copies into `t`.
+        .map(|target| match target.to_ascii_uppercase().rfind(" AS ") {
+            Some(alias) => target[..alias].trim_end().to_string(),
+            None => target.to_string(),
+        })
         .filter(|target| !target.is_empty())
         .ok_or_else(|| anyhow!("bulk_copy: could not find the INSERT INTO table."))?;
     let close = prefix[open..]
@@ -812,12 +825,25 @@ impl SqlxPublisher {
     }
 }
 
+/// How long a status check waits for the server to answer a ping.
+const PING_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Healthy only if a pooled connection still answers: the pool hands out an idle one the
 /// server has closed unless `test_before_acquire` is set.
 async fn pool_health(pool: &AnyPool) -> (bool, Option<String>) {
     use sqlx::Connection;
     let answered = match pool.acquire().await {
-        Ok(mut conn) => conn.ping().await,
+        Ok(mut conn) => match tokio::time::timeout(PING_TIMEOUT, conn.ping()).await {
+            Ok(answered) => answered,
+            Err(_) => {
+                // A connection that stopped answering must not go back to the pool.
+                conn.close_on_drop();
+                return (
+                    false,
+                    Some(format!("ping timed out after {PING_TIMEOUT:?}")),
+                );
+            }
+        },
         Err(e) => Err(e),
     };
     match answered {
@@ -1093,7 +1119,8 @@ impl SqlxPublisher {
             return self.send_batch_iterative(messages, held).await;
         }
         // A further tuple is part of every single-row insert; the rebuild would write it once.
-        if values_suffix.trim_start().starts_with(',') {
+        // An unterminated comment is ambiguous, so it is treated as a further tuple.
+        if skip_sql_comments(values_suffix).is_none_or(|rest| rest.starts_with(',')) {
             warn!(
                 "insert_query has more than one VALUES tuple. Falling back to iterative inserts."
             );

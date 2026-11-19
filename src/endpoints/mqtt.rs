@@ -543,8 +543,8 @@ pub(crate) fn default_client_id(route_name: &str, publisher: bool) -> String {
     format!("{APP_NAME}-{route_name}{suffix}")
 }
 
-/// Counts the PUBACKs (PUBRECs for QoS 2) queued and written, so a closing consumer flushes
-/// its acks: an ack still queued when the connection closes is lost and redelivered.
+/// Counts the PUBACKs (PUBRECs for QoS 2) and replies queued and written, so a closing consumer
+/// flushes them: an ack still queued when the connection closes is lost and redelivered.
 #[derive(Default)]
 struct AckWrites {
     queued: AtomicU64,
@@ -567,6 +567,24 @@ impl AckWrites {
         result
     }
 
+    async fn reply(
+        &self,
+        client: &Client,
+        reply_topic: Option<String>,
+        correlation_data: Option<String>,
+        resp: CanonicalMessage,
+    ) -> anyhow::Result<()> {
+        if reply_topic.is_none() {
+            return Ok(());
+        }
+        self.queued.fetch_add(1, Ordering::SeqCst);
+        let result = handle_mqtt_reply(client, reply_topic, correlation_data, resp).await;
+        if result.is_err() {
+            self.queued.fetch_sub(1, Ordering::SeqCst);
+        }
+        result
+    }
+
     /// Capped at `queued`: acks of an old connection still written after `reset` must not
     /// count for ones queued since. Only the event loop writes `written`.
     fn record_write(&self) {
@@ -575,7 +593,8 @@ impl AckWrites {
         self.written.store(next, Ordering::SeqCst);
     }
 
-    /// A new connection may drop acks queued for the old one; waiting for them would stall.
+    /// A failed connection drops the PUBACKs still queued for it; waiting for them would stall.
+    /// Called on the failure, so acks queued after it, for the next connection, still count.
     fn reset(&self) {
         self.written
             .fetch_max(self.queued.load(Ordering::SeqCst), Ordering::SeqCst);
@@ -735,7 +754,8 @@ impl MessageConsumer for MqttListener {
                         return Ok(());
                     }
                     MessageDisposition::Reply(resp) => {
-                        handle_mqtt_reply(&client, reply_topic, correlation_data, resp).await?;
+                        acks.reply(&client, reply_topic, correlation_data, resp)
+                            .await?;
                         // Fallthrough to Ack
                     }
                     MessageDisposition::Ack => {
@@ -825,7 +845,8 @@ impl MessageConsumer for MqttListener {
                     ack_futures.push(async move {
                         match disposition {
                             MessageDisposition::Reply(resp) => {
-                                handle_mqtt_reply(&client, reply_topic, correlation_data, resp)
+                                ack_writes
+                                    .reply(&client, reply_topic, correlation_data, resp)
                                     .await?;
                                 ack_writes.ack(&client, &ack).await.map_err(|e| {
                                     error!("Failed to ack MQTT message in batch: {}", e);
@@ -1066,9 +1087,6 @@ async fn run_eventloop(
                                 }
                                 rumqttc::Incoming::ConnAck(ack) => {
                                     is_connected.store(true, Ordering::Relaxed);
-                                    if let Some(acks) = &acks {
-                                        acks.reset();
-                                    }
                                     if !ack.session_present {
                                         // rumqttc drops its in-flight publishes on a fresh
                                         // session; fail any pending confirmations so they retry.
@@ -1131,7 +1149,9 @@ async fn run_eventloop(
                                 outstanding_pkids.insert(pkid);
                             }
                             EventWrapper::V3(rumqttc::Event::Outgoing(
-                                rumqttc::Outgoing::PubAck(_) | rumqttc::Outgoing::PubRec(_),
+                                rumqttc::Outgoing::Publish(_)
+                                | rumqttc::Outgoing::PubAck(_)
+                                | rumqttc::Outgoing::PubRec(_),
                             )) => {
                                 if let Some(acks) = &acks {
                                     acks.record_write();
@@ -1156,9 +1176,6 @@ async fn run_eventloop(
                                     }
                                     rumqttc::v5::Event::Incoming(rumqttc::v5::Incoming::ConnAck(ack)) => {
                                         is_connected.store(true, Ordering::Relaxed);
-                                        if let Some(acks) = &acks {
-                                            acks.reset();
-                                        }
                                         if !ack.session_present {
                                             // rumqttc drops its in-flight publishes on a fresh
                                             // session; fail pending confirmations so they retry.
@@ -1219,7 +1236,9 @@ async fn run_eventloop(
                                         outstanding_pkids.insert(pkid);
                                     }
                                     rumqttc::v5::Event::Outgoing(
-                                        rumqttc::Outgoing::PubAck(_) | rumqttc::Outgoing::PubRec(_),
+                                        rumqttc::Outgoing::Publish(_)
+                                        | rumqttc::Outgoing::PubAck(_)
+                                        | rumqttc::Outgoing::PubRec(_),
                                     ) => {
                                         if let Some(acks) = &acks {
                                             acks.record_write();
@@ -1236,6 +1255,9 @@ async fn run_eventloop(
                     }
                     Err(e) => {
                         is_connected.store(false, Ordering::Relaxed);
+                        if let Some(acks) = &acks {
+                            acks.reset();
+                        }
                         error!("MQTT EventLoop error: {}. Reconnecting...", e);
                         tokio::time::sleep(Duration::from_secs(1)).await;
                     }

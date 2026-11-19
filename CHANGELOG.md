@@ -20,8 +20,9 @@ All notable changes to `mq-bridge`. Newest first.
 - **`kafka`: a nack no longer replays the acks before it.** A batch with any nack committed
   nothing, so messages acked ahead of the nack were delivered again. Each partition now
   commits up to its first nack before the consumer reconnects.
-- **`sqlx` queue table: a nacked row is read again at once.** It stayed locked until
-  `locked_until` expired, 60 seconds later. A consumer that dies still waits for the lock.
+- **`sqlx` queue table: with `delete_after_read: true`, a nacked row is read again at once.** It
+  stayed locked until `locked_until` expired, 60 seconds later. With the default `false`, a
+  nacked row still stays locked until then, and a consumer that dies still waits for the lock.
 - **`mqtt`: acks committed right before a consumer closes reach the broker.** The event loop
   stopped 100 ms after the consumer closed, or at once when a message arrived meanwhile, so
   queued PUBACKs could be lost and the broker delivered those messages again. It now runs

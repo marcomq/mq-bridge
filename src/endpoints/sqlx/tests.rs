@@ -70,6 +70,10 @@ fn extract_copy_columns_rejects_on_conflict_and_literals() {
     assert!(extract_copy_columns("INSERT INTO t (a, b) VALUES (${payload:a})", 1).is_err());
     // COPY writes one row per message; a second tuple would be dropped.
     assert!(extract_copy_columns("INSERT INTO t (a) VALUES (${payload:a}), ('audit')", 1).is_err());
+    // COPY takes no alias.
+    let (table, _) =
+        extract_copy_columns("INSERT INTO s.t AS x (a) VALUES (${payload:a})", 1).unwrap();
+    assert_eq!(table, "s.t");
 }
 
 async fn setup_db_file() -> (tempfile::TempDir, String) {
@@ -2836,27 +2840,32 @@ async fn test_sqlx_cursor_reader_emits_generated_columns() {
 
 #[tokio::test]
 async fn test_sqlx_batch_keeps_every_values_tuple_per_message() {
-    let (_dir, url, pool) = setup_arbitrary_table(0).await;
-    sqlx::query("CREATE TABLE tagged (v TEXT)")
-        .execute(&pool)
-        .await
-        .unwrap();
-    let config = SqlxConfig {
-        url,
-        table: "tagged".to_string(),
-        insert_query: Some("INSERT INTO tagged (v) VALUES (${payload:v}), ('audit')".to_string()),
-        ..Default::default()
-    };
-    let publisher = SqlxPublisher::new(&config).await.unwrap();
-    let messages =
-        ["a", "b"].map(|v| CanonicalMessage::new(format!(r#"{{"v":"{v}"}}"#).into_bytes(), None));
-    publisher.send_batch(messages.to_vec()).await.unwrap();
-    let audits: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tagged WHERE v = 'audit'")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(
-        audits, 2,
-        "one audit row per message, as single sends write"
-    );
+    for insert_query in [
+        "INSERT INTO tagged (v) VALUES (${payload:v}), ('audit')",
+        "INSERT INTO tagged (v) VALUES (${payload:v}) /* audit */ , ('audit')",
+    ] {
+        let (_dir, url, pool) = setup_arbitrary_table(0).await;
+        sqlx::query("CREATE TABLE tagged (v TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let config = SqlxConfig {
+            url,
+            table: "tagged".to_string(),
+            insert_query: Some(insert_query.to_string()),
+            ..Default::default()
+        };
+        let publisher = SqlxPublisher::new(&config).await.unwrap();
+        let messages = ["a", "b"]
+            .map(|v| CanonicalMessage::new(format!(r#"{{"v":"{v}"}}"#).into_bytes(), None));
+        publisher.send_batch(messages.to_vec()).await.unwrap();
+        let audits: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tagged WHERE v = 'audit'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            audits, 2,
+            "{insert_query}: one audit row per message, as single sends write"
+        );
+    }
 }

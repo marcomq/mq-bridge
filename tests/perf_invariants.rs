@@ -382,6 +382,7 @@ async fn buffer_and_pack_never_send_more_often_than_batches_arrive() {
 /// An order-sensitive sink loses its sequencing if a wrapper forgets to forward the flag.
 #[tokio::test]
 async fn every_output_middleware_keeps_the_sink_ordered() {
+    let _serial = SERIAL.lock().await;
     let mut list = passthrough_output_middlewares();
     list.push((
         "buffer",

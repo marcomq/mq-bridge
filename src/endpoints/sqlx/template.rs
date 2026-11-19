@@ -100,6 +100,20 @@ pub(super) fn positional_placeholder(driver_name: &str, index: usize) -> String 
     }
 }
 
+/// `sql` without its leading whitespace and comments; `None` for an unterminated block comment.
+pub(super) fn skip_sql_comments(mut sql: &str) -> Option<&str> {
+    loop {
+        sql = sql.trim_start();
+        if let Some(rest) = sql.strip_prefix("--") {
+            sql = rest.split_once('\n').map_or("", |(_, after)| after);
+        } else if let Some(rest) = sql.strip_prefix("/*") {
+            sql = rest.split_once("*/")?.1;
+        } else {
+            return Some(sql);
+        }
+    }
+}
+
 /// True when `sql` still binds a value: an unrewritten `${…}` token, or a positional
 /// placeholder in any of the driver spellings (`?`, `$N`, `@pN`).
 pub(super) fn binds_after_values(sql: &str) -> bool {

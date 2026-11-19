@@ -241,7 +241,46 @@ impl Source {
             if let Err(error) = (batch.commit)(dispositions).await {
                 println!("[{name}] {step}: commit failed with `{error:#}`, reconnecting");
                 self.reconnect().await;
+                // The batch is unsettled, so the step is not done with it.
+                done = false;
             }
+        }
+    }
+
+    /// Reads for `window`, settling each message as `settle` says.
+    async fn linger(
+        &mut self,
+        window: Duration,
+        mut settle: impl FnMut(&CanonicalMessage) -> MessageDisposition,
+    ) {
+        let until = Instant::now() + window;
+        while let Some(left) = until.checked_duration_since(Instant::now()) {
+            let consumer = self.open().await;
+            match tokio::time::timeout(left, consumer.receive_batch(16)).await {
+                Ok(Ok(batch)) => {
+                    let dispositions = batch.messages.iter().map(&mut settle).collect();
+                    if let Err(error) = (batch.commit)(dispositions).await {
+                        println!("[{}] linger: commit failed with `{error:#}`", self.name);
+                        self.reconnect().await;
+                    }
+                }
+                Ok(Err(_)) => self.reconnect().await,
+                Err(_) => {}
+            }
+        }
+    }
+}
+
+/// Publishes `messages` and fails the step if the publisher refused any of them.
+async fn publish(publisher: &dyn MessagePublisher, messages: Vec<CanonicalMessage>) {
+    if let SentBatch::Partial { failed, .. } =
+        publisher.send_batch(messages).await.expect("publish")
+    {
+        if let Some((_, error)) = failed.first() {
+            panic!(
+                "publish: {} message(s) failed, first: {error}",
+                failed.len()
+            );
         }
     }
 }
@@ -258,7 +297,13 @@ async fn send_in_order(publisher: &dyn MessagePublisher, payloads: &[String], ru
 
 /// Acks A, B and D, nacks C and E, then restarts the consumer: C and E come back, and A
 /// and B, acked before the first nack, do not. Catches a commit that skips past a nack.
-async fn check_mixed_acks(source: &mut Source, publisher: &dyn MessagePublisher, run: u128) {
+/// An unordered source may hand A back after C and E, so it is read on for a while.
+async fn check_mixed_acks(
+    source: &mut Source,
+    publisher: &dyn MessagePublisher,
+    run: u128,
+    ordered: bool,
+) {
     let name = source.name;
     let ids: Vec<String> = (0..5)
         .map(|i| format!("contract-{run:x}-mixed-{i}"))
@@ -297,6 +342,17 @@ async fn check_mixed_acks(source: &mut Source, publisher: &dyn MessagePublisher,
             (MessageDisposition::Ack, back.len() == 2)
         })
         .await;
+    if !ordered {
+        source
+            .linger(IDLE, |message| {
+                let payload = text(message);
+                if payload == ids[0] || payload == ids[1] {
+                    acked_back.push(payload);
+                }
+                MessageDisposition::Ack
+            })
+            .await;
+    }
     assert!(
         acked_back.is_empty(),
         "[{name}] acked messages came back: {acked_back:?}"
@@ -310,7 +366,7 @@ async fn check_metadata(source: &mut Source, publisher: &dyn MessagePublisher, r
     let tag = format!("{run:x}");
     let message = CanonicalMessage::new(payload.clone().into_bytes(), None)
         .with_metadata_kv("contract_tag", tag.clone());
-    publisher.send_batch(vec![message]).await.expect("publish");
+    publish(publisher, vec![message]).await;
     let mut received = None;
     source
         .read("metadata", |message| {
@@ -339,7 +395,7 @@ async fn check_backpressure(source: &mut Source, publisher: &dyn MessagePublishe
         .iter()
         .map(|payload| CanonicalMessage::new(payload.clone().into_bytes(), None))
         .collect();
-    publisher.send_batch(messages).await.expect("publish");
+    publish(publisher, messages).await;
 
     let mut seen = HashSet::new();
     let mut held = Vec::new();
@@ -351,6 +407,12 @@ async fn check_backpressure(source: &mut Source, publisher: &dyn MessagePublishe
         );
         let consumer = source.open().await;
         match tokio::time::timeout(IDLE, consumer.receive_batch(8)).await {
+            // An empty poll after a delivery: the broker stopped handing out.
+            Ok(Ok(batch)) if batch.messages.is_empty() => {
+                if !held.is_empty() {
+                    break;
+                }
+            }
             Ok(Ok(batch)) => {
                 for message in &batch.messages {
                     let payload = text(message);
@@ -413,7 +475,7 @@ async fn check_route_stops(source: &mut Source, publisher: &dyn MessagePublisher
 
     let payload = format!("contract-{run:x}-route");
     let message = CanonicalMessage::new(payload.clone().into_bytes(), None);
-    publisher.send_batch(vec![message]).await.expect("publish");
+    publish(publisher, vec![message]).await;
     let deadline = Instant::now() + LIMIT;
     loop {
         assert!(
@@ -615,7 +677,7 @@ pub async fn check(contract: Contract) {
             .iter()
             .map(|(payload, id)| CanonicalMessage::new(payload.clone().into_bytes(), Some(*id)))
             .collect();
-        publisher.send_batch(messages).await.expect("publish");
+        publish(publisher.as_ref(), messages).await;
 
         let first = source
             .deliveries("nack", &payloads, Some(MessageDisposition::Nack))
@@ -640,7 +702,7 @@ pub async fn check(contract: Contract) {
 
         let crashed = vec![format!("contract-{run:x}-crash")];
         let message = CanonicalMessage::new(crashed[0].clone().into_bytes(), Some(run + 9));
-        publisher.send_batch(vec![message]).await.expect("publish");
+        publish(publisher.as_ref(), vec![message]).await;
         let before = source.deliveries("crash", &crashed, None).await;
         if let Some(expire_locks) = contract.expire_locks {
             expire_locks().await;
@@ -653,7 +715,7 @@ pub async fn check(contract: Contract) {
         }
         println!("[{name}] 2 crash: ok after {:.1?}", started.elapsed());
 
-        check_mixed_acks(&mut source, publisher.as_ref(), run).await;
+        check_mixed_acks(&mut source, publisher.as_ref(), run, contract.ordered).await;
         println!("[{name}] 3 mixed acks: ok after {:.1?}", started.elapsed());
         if contract.keeps_metadata {
             check_metadata(&mut source, publisher.as_ref(), run).await;
@@ -788,6 +850,8 @@ fn mysql_contract(name: &'static str, url: &'static str) -> Contract {
     contract.stable_id = false;
     contract.hop_keeps_id = false;
     contract.keeps_metadata = false;
+    // The claimed rows come back in no specified order.
+    contract.ordered = false;
     contract
 }
 
@@ -871,6 +935,8 @@ async fn test_postgres_contract() {
     contract.stable_id = false;
     contract.hop_keeps_id = false;
     contract.keeps_metadata = false;
+    // `RETURNING` hands the claimed rows back in no specified order.
+    contract.ordered = false;
     contract.expire_locks = Some(|| {
         Box::pin(async {
             let pool = sqlx::PgPool::connect("postgres://testuser:testpass@localhost:5432/testdb")
