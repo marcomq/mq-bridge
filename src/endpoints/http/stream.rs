@@ -70,23 +70,12 @@ pub(super) fn header_contains_media(headers: &hyper::HeaderMap, name: &str, need
     })
 }
 
-pub(super) fn stream_request_format(headers: &hyper::HeaderMap) -> HttpStreamFormat {
-    if header_contains_media(headers, "content-type", "text/event-stream") {
+/// The stream format a request sends (`content-type`) or asks for back (`accept`).
+pub(super) fn stream_format(headers: &hyper::HeaderMap, header: &str) -> HttpStreamFormat {
+    if header_contains_media(headers, header, "text/event-stream") {
         HttpStreamFormat::Sse
-    } else if header_contains_media(headers, "content-type", "application/x-ndjson")
-        || header_contains_media(headers, "content-type", "application/jsonl")
-    {
-        HttpStreamFormat::Ndjson
-    } else {
-        HttpStreamFormat::RawChunks
-    }
-}
-
-pub(super) fn stream_response_format(headers: &hyper::HeaderMap) -> HttpStreamFormat {
-    if header_contains_media(headers, "accept", "text/event-stream") {
-        HttpStreamFormat::Sse
-    } else if header_contains_media(headers, "accept", "application/x-ndjson")
-        || header_contains_media(headers, "accept", "application/jsonl")
+    } else if header_contains_media(headers, header, "application/x-ndjson")
+        || header_contains_media(headers, header, "application/jsonl")
     {
         HttpStreamFormat::Ndjson
     } else {
@@ -933,14 +922,17 @@ mod tests {
             hyper::header::CONTENT_TYPE,
             hyper::header::HeaderValue::from_static("text/event-stream; charset=utf-8"),
         )]);
-        assert_eq!(stream_request_format(&sse_headers), HttpStreamFormat::Sse);
+        assert_eq!(
+            stream_format(&sse_headers, "content-type"),
+            HttpStreamFormat::Sse
+        );
 
         let ndjson_headers = hyper::HeaderMap::from_iter([(
             hyper::header::ACCEPT,
             hyper::header::HeaderValue::from_static("application/json, application/x-ndjson"),
         )]);
         assert_eq!(
-            stream_response_format(&ndjson_headers),
+            stream_format(&ndjson_headers, "accept"),
             HttpStreamFormat::Ndjson
         );
     }

@@ -399,6 +399,10 @@ fn query_param(msg: &CanonicalMessage, key: &str) -> Option<String> {
         })
 }
 
+fn consumer_param(msg: &CanonicalMessage) -> Option<String> {
+    query_param(msg, "consumer_id").or_else(|| query_param(msg, "consumer"))
+}
+
 fn request_peer_is_loopback(msg: &CanonicalMessage) -> bool {
     msg.get_metadata("mqb_peer_loopback")
         .is_some_and(|value| value == "true")
@@ -1116,18 +1120,14 @@ impl UiApp {
             ("GET", "/storage-security") => self.ok_json(&self.storage_security(), true),
             ("GET", "/features") => self.ok_json(&FeatureAvailabilityResponse::detect(), true),
             ("GET", "/consumer-status") => {
-                let consumer_key = query_param(&msg, "consumer_id")
-                    .or_else(|| query_param(&msg, "consumer"))
-                    .unwrap_or_default();
+                let consumer_key = consumer_param(&msg).unwrap_or_default();
                 match self.consumer_status(&consumer_key).await {
                     Some(status) => self.ok_json(&status, false),
                     None => self.err_response(404, format!("Consumer not found: {consumer_key}")),
                 }
             }
             ("POST", "/consumer-start") => {
-                let consumer_key = query_param(&msg, "consumer_id")
-                    .or_else(|| query_param(&msg, "consumer"))
-                    .unwrap_or_default();
+                let consumer_key = consumer_param(&msg).unwrap_or_default();
                 match self.start_consumer(&consumer_key).await {
                     Ok(true) => Ok(Handled::Publish(msg!("Started"))),
                     Ok(false) => {
@@ -1137,15 +1137,12 @@ impl UiApp {
                 }
             }
             ("POST", "/consumer-stop") => {
-                let consumer_key = query_param(&msg, "consumer_id")
-                    .or_else(|| query_param(&msg, "consumer"))
-                    .unwrap_or_default();
+                let consumer_key = consumer_param(&msg).unwrap_or_default();
                 self.stop_consumer(&consumer_key).await;
                 Ok(Handled::Publish(msg!("Stopped")))
             }
             ("GET", "/messages") => {
-                let consumer =
-                    query_param(&msg, "consumer_id").or_else(|| query_param(&msg, "consumer"));
+                let consumer = consumer_param(&msg);
                 self.ok_json(&self.get_messages(consumer.as_deref()).await, true)
             }
             ("POST", "/config") => self.handle_update_config_message(msg).await,

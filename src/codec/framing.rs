@@ -24,15 +24,15 @@ pub(crate) fn record_quotes(
     })
 }
 
-/// Splits a buffer into record slices on `delimiter`, dropping a trailing empty
+/// Splits a buffer into record spans on `delimiter`, dropping a trailing empty
 /// remainder and a stray `\r` before a `\n` delimiter (mirrors the file reader). With
 /// `csv`, a delimiter inside a quoted field is data, as it is for the file reader.
 #[cfg(feature = "object-store")]
-pub(crate) fn split_records<'a>(
-    data: &'a [u8],
+pub(crate) fn split_records(
+    data: &[u8],
     delimiter: &[u8],
     csv: Option<&CsvDialect>,
-) -> Vec<&'a [u8]> {
+) -> Vec<super::format::RecordSpan> {
     let mut records = Vec::new();
     if delimiter.is_empty() {
         return records;
@@ -58,12 +58,12 @@ pub(crate) fn split_records<'a>(
             scanned = at + delimiter.len();
         }
         let end = at - usize::from(newline && at > start && data[at - 1] == b'\r');
-        records.push(&data[start..end]);
+        records.push((start, end, start as u64));
         start = at + delimiter.len();
         from = start;
     }
     if start < data.len() {
-        records.push(&data[start..]);
+        records.push((start, data.len(), start as u64));
     }
     records
 }

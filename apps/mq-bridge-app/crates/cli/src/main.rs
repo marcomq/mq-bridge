@@ -536,114 +536,12 @@ async fn main() -> anyhow::Result<()> {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     mq_bridge::plugin::enable_plugin_discovery();
 
-    let args = Args::parse();
-
-    match args.command {
-        Some(Command::Copy(copy_args)) => {
-            init_copy_logging(args.color, copy_args.verbose);
-            load_cli_plugins(&args.plugins)?;
-            return run_copy(copy_args, StopWhen::SourceDrained).await;
-        }
-        Some(Command::AgentListen(listen_args)) => {
-            init_copy_logging(args.color, listen_args.verbose);
-            load_cli_plugins(&args.plugins)?;
-            return run_agent_listen(listen_args).await;
-        }
-        Some(Command::Mcp(mcp_args)) => {
-            // The install actions configure clients and exit; only the bare
-            // `mcp` command actually serves.
-            match mcp_args.action {
-                Some(McpAction::Install {
-                    client,
-                    local,
-                    print_config,
-                    agent_bus,
-                }) => {
-                    return if print_config {
-                        mcp_install::print_config(agent_bus)
-                    } else {
-                        mcp_install::install(client, local, agent_bus)
-                    };
-                }
-                Some(McpAction::Uninstall { client, local }) => {
-                    return mcp_install::uninstall(client, local);
-                }
-                Some(McpAction::Status { local }) => return mcp_install::status(local),
-                None => {}
-            }
-
-            // stdio transport uses stdout as the MCP channel, so logs must go to stderr.
-            init_mcp_logging(args.color);
-            load_cli_plugins(&args.plugins)?;
-            let workspace_path = config_file_path(args.config.clone());
-            return mcp::run(
-                mcp_args.transport,
-                mcp_args.bind,
-                mcp_args.report_to_ui && !mcp_args.no_report_to_ui,
-                mcp_args.agent_bus,
-                workspace_path,
-            )
-            .await;
-        }
-        Some(Command::Checkpoint(checkpoint_args)) => {
-            init_copy_logging(args.color, checkpoint_args.verbose());
-            load_cli_plugins(&args.plugins)?;
-            return checkpoint_cmd::run(checkpoint_args, args.config, args.config_str).await;
-        }
-        Some(Command::Status(status_args)) => {
-            return status_cmd::run(status_args, args.color).await;
-        }
-        Some(Command::List(list_args)) => {
-            init_copy_logging(args.color, false);
-            load_cli_plugins(&args.plugins)?;
-            return catalog_cmd::list(list_args);
-        }
-        Some(Command::Describe(describe_args)) => {
-            init_copy_logging(args.color, false);
-            load_cli_plugins(&args.plugins)?;
-            return catalog_cmd::describe(describe_args);
-        }
-        Some(Command::ToCli) => {
-            let (config, _) = load_config(
-                args.config,
-                args.init_config,
-                args.init_config_str,
-                args.config_str,
-            )
-            .context("Failed to load configuration")?;
-            let export = mq_bridge_app::cli_command::inline_config_command(&config)?;
-            println!("{}", export.command);
-            if !export.required_env.is_empty() {
-                eprintln!(
-                    "Required environment variables: {}",
-                    export.required_env.join(", ")
-                );
-            }
-            return Ok(());
-        }
-        None => {}
+    let mut args = Args::parse();
+    if let Some(command) = args.command.take() {
+        return run_command(command, args).await;
     }
-
-    if let Some(schema_path) = args.schema {
-        mq_bridge_app::plugins::discover_installed_plugins();
-        let schema = mq_bridge_app::config::app_config_schema();
-        let schema_json =
-            serde_json::to_string_pretty(&schema).context("Failed to serialize schema")?;
-
-        if schema_path == "-" {
-            println!("{}", schema_json);
-        } else {
-            let path = std::path::Path::new(&schema_path);
-            if let Some(parent) = path.parent()
-                && !parent.as_os_str().is_empty()
-                && !parent.exists()
-            {
-                std::fs::create_dir_all(parent)
-                    .context("Failed to create parent directory for schema")?;
-            }
-            std::fs::write(path, schema_json).context("Failed to write schema file")?;
-        }
-        return Ok(());
+    if let Some(schema_path) = &args.schema {
+        return write_schema(schema_path);
     }
 
     // The UI saves to this path, and an init source fills it; otherwise a missing file is a typo.
@@ -660,139 +558,35 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     let (mut config, config_file_path): (AppConfig, String) = load_config(
-        args.config,
-        args.init_config,
-        args.init_config_str,
-        args.config_str,
+        args.config.take(),
+        args.init_config.take(),
+        args.init_config_str.take(),
+        args.config_str.take(),
     )
     .context("Failed to load configuration")?;
     init_logging(&config, args.color);
     load_cli_plugins(&args.plugins)?;
     mq_bridge_app::plugins::load_trusted_plugins(&config.plugins, &config.env_vars)?;
     if args.drain {
-        if !config.consumers.iter().any(|consumer| consumer.enabled) {
-            anyhow::bail!("--drain: the configuration defines no enabled routes");
-        }
-        if let Some(consumer) = config.consumers.iter().find(|consumer| {
-            consumer.enabled
-                && matches!(
-                    consumer.endpoint.endpoint_type,
-                    mq_bridge::models::EndpointType::Null
-                )
-        }) {
-            anyhow::bail!("--drain: enabled route '{}' has no source", consumer.name);
-        }
-        for consumer in &mut config.consumers {
-            consumer.options.exit_on_empty = true;
-        }
+        drain_all_routes(&mut config)?;
     }
     println!(
         r#"
       ┌────── mq-bridge-app ──────┐
 ──────┴───────────────────────────┴──────"#
     );
+    resolve_listen_addrs(&mut config, &args, &config_file_path);
 
-    // --- Logic for default addresses ---
-    // When no persisted config file exists (common in http/no-tauri dev mode), ensure
-    // UI + metrics are reachable with sane defaults.
-    let has_persisted_config = std::path::Path::new(&config_file_path).exists();
-    let unconfigured = !has_persisted_config || config.consumers.is_empty();
-    let mut implicit_metrics_addr = false;
-    if let Some(addr) = args.metrics_addr {
-        config.metrics_addr = addr;
-    } else if args.no_metrics {
-        config.metrics_addr = String::new();
-    } else if unconfigured && config.metrics_addr.is_empty() {
-        config.metrics_addr = DEFAULT_METRICS_ADDR.to_string();
-        implicit_metrics_addr = true;
-    }
-    // Nobody asked for this port, so a second instance must not fail on it.
-    if implicit_metrics_addr && std::net::TcpListener::bind(DEFAULT_METRICS_ADDR).is_err() {
-        warn!(
-            "{DEFAULT_METRICS_ADDR} is in use, so the Prometheus endpoint is not served; pass --metrics-addr to serve it elsewhere"
-        );
-        config.metrics_addr = String::new();
-    }
-    // The UI is a control surface, so its port is the one address never opened
-    // implicitly: a `ui_addr` in the config counts as consent, an accidental
-    // bare run does not. `--ui` opts in even when a config leaves the address
-    // empty; `--no-ui` withdraws that consent even when the config gives one;
-    // otherwise the previously automatic default has to be confirmed.
-    //
-    // The prompt is offered only when there is nothing to run, which is the
-    // "start empty and build a config in the UI" case. A config that defines
-    // routes or consumers is a deployment: it must never stop at a question.
-    if args.no_ui || args.drain {
-        config.ui_addr = String::new();
-    } else if config.ui_addr.is_empty() {
-        // The container image sets this to every interface; a host stays on loopback.
-        let default_addr = std::env::var(DEFAULT_UI_ADDR_ENV)
-            .ok()
-            .filter(|addr| !addr.trim().is_empty())
-            .unwrap_or_else(|| DEFAULT_UI_ADDR.to_string());
-        if args.ui || (nothing_to_run(&config) && ui_prompt(&default_addr)) {
-            config.ui_addr = default_addr;
-        }
-    }
-
-    let mut prom_addr = None;
-    // --- 2. Initialize Prometheus Metrics Exporter ---
-    // Without a metrics port or UI nobody reads the recorder, and building one
-    // costs up to 200 ms of `quanta` clock calibration; the macros stay no-ops.
-    let builder = metrics_exporter_prometheus::PrometheusBuilder::new();
-    let (recorder, metrics_task) =
-        if !config.metrics_addr.is_empty() && config.metrics_addr != config.ui_addr {
-            let addr: SocketAddr = config.metrics_addr.parse().context(format!(
-                "Failed to parse metrics listen address: {}",
-                config.metrics_addr
-            ))?;
-            let (recorder, server_future) = builder.with_http_listener(addr).build()?;
-            prom_addr = Some(addr);
-            (Some(recorder), Some(tokio::spawn(server_future)))
-        } else if !config.ui_addr.is_empty() {
-            (Some(builder.build_recorder()), None)
-        } else {
-            (None, None)
-        };
-    let prometheus_handle = recorder.as_ref().map(|recorder| recorder.handle());
-    if let Some(recorder) = recorder {
-        metrics::set_global_recorder(recorder).context("Failed to install Prometheus recorder")?;
-    }
+    let metrics = install_metrics(&config)?;
     #[cfg(feature = "otel")]
     let otel_guard = mq_bridge_app::otel_export::init_from_env()
         .context("Failed to install OpenTelemetry OTLP exporter")?;
-
-    // `metrics-exporter-prometheus` only drains its histogram buckets during
-    // upkeep. The `build()` (http-listener) branch above spawns its own upkeep
-    // task, but `build_recorder()` does not, so without this the per-message
-    // `queue_message_processing_duration_seconds` samples recorded by mq-bridge
-    // accumulate in an unbounded AtomicBucket and slowly leak memory. Drive
-    // upkeep manually whenever we built the recorder without a listener.
-    if let (Some(upkeep_handle), None) = (prometheus_handle.clone(), &metrics_task) {
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
-            loop {
-                interval.tick().await;
-                upkeep_handle.run_upkeep();
-            }
-        });
-    }
-
-    metrics::describe_gauge!(
-        "mq_bridge_app_info",
-        "Information about the mq-bridge-app application"
-    );
-    // Standard Prometheus pattern: use a fixed value of 1.0 for info metrics,
-    // encoding the actual data (version, etc.) in the labels.
-    metrics::gauge!("mq_bridge_app_info", "version" => env!("CARGO_PKG_VERSION")).set(1.0);
+    metrics.start_upkeep();
 
     // Headless only: with a web UI running, its own `UiApp` owns the lease and
     // publishes richer state, so a second lease for the same process would just
     // duplicate every row.
     let mut cli_status = None;
-    let workspace_path = config_file_path.clone();
-
-    // Start Web UI
     // Headless, this owns the consumers it started: dropping the app stops their
     // routes, so it has to live until shutdown. With a UI, `start_web_server`
     // owns them for as long as it serves.
@@ -800,82 +594,21 @@ async fn main() -> anyhow::Result<()> {
     // Headless and all routes drain: how many of them failed to start.
     let mut drain_job = None;
     let web_ui_handle = if !config.ui_addr.is_empty() {
-        let addr = &config.ui_addr;
-        let socket_addr: SocketAddr = addr
-            .parse()
-            .with_context(|| format!("Failed to parse UI listen address: {}", addr))?;
-        let port = socket_addr.port();
-        let host = if socket_addr.ip().is_unspecified() {
-            "localhost".to_string()
-        } else {
-            socket_addr.ip().to_string()
-        };
-        println!(
-            r#"      Web UI: http://{}:{}
-"#,
-            host, port
-        );
-        info!(
-            "Prometheus metrics enabled on Web UI (http://{}/metrics)",
-            config.ui_addr
-        );
-        if !socket_addr.ip().is_loopback() {
-            warn!(
-                "The web UI has no login and listens on {}: anyone who can reach that address can read and change the configuration, secrets included",
-                config.ui_addr
-            );
-        }
-
-        let web_ui_server = web_ui::start_web_server(
-            addr.into(),
-            config.clone(),
-            args.plugins.clone(),
-            prometheus_handle,
-            config_file_path,
-        );
-        Some(tokio::spawn(web_ui_server))
-    } else {
-        println!(
-            r#"        Starting without UI server
-"#
-        );
-        // No UI means no other owner for what the config describes, so the
-        // consumers are started here — otherwise a headless deployment loads a
-        // config and then runs nothing.
-        let app = UiApp::new_with_startup_plugins(
-            config.clone(),
-            prometheus_handle,
-            config_file_path,
+        Some(spawn_web_ui(
+            &config,
             &args.plugins,
-        )?
-        .with_instance_kind(InstanceKind::Cli);
-        cli_status = cli_status_lease(workspace_path, config.clone(), app.clone());
-        let enabled_consumers = config
-            .consumers
-            .iter()
-            .filter(|consumer| consumer.enabled)
-            .count();
-        let started_consumers = app.start_configured_consumers().await;
-        if started_consumers < enabled_consumers {
-            warn!("Started {started_consumers} of {enabled_consumers} enabled consumers");
-        }
-        if enabled_consumers > 0 && started_consumers == 0 {
-            anyhow::bail!("none of the {enabled_consumers} enabled consumers could be started");
-        }
-        // Every enabled route drains, so the run is a batch job that ends with them.
-        if enabled_consumers > 0
-            && config
-                .consumers
-                .iter()
-                .filter(|consumer| consumer.enabled)
-                .all(|consumer| consumer.options.exit_on_empty)
-        {
-            drain_job = Some(enabled_consumers - started_consumers);
-        }
-        headless_app = Some(app);
+            metrics.handle,
+            config_file_path,
+        )?)
+    } else {
+        let headless =
+            start_headless(&config, metrics.handle, config_file_path, &args.plugins).await?;
+        cli_status = headless.status;
+        drain_job = headless.drain_job;
+        headless_app = Some(headless.app);
         None
     };
-    if let Some(addr) = prom_addr {
+    if let Some(addr) = metrics.prom_addr {
         info!("Prometheus exporter listening on http://{}", addr);
     }
 
@@ -910,7 +643,363 @@ async fn main() -> anyhow::Result<()> {
     // clone of the app, so it goes first.
     drop(cli_status);
     drop(headless_app);
+    stop_all_routes().await;
 
+    // Abort the metrics task if it's running. It doesn't support graceful shutdown.
+    if let Some(task) = metrics.task {
+        task.abort();
+    }
+    if let Some(handle) = web_ui_handle {
+        handle.abort();
+    }
+
+    #[cfg(feature = "otel")]
+    drop(otel_guard);
+
+    info!("Shutdown complete.");
+
+    drained
+}
+
+/// Runs a subcommand; these load their own configuration, or none.
+async fn run_command(command: Command, args: Args) -> anyhow::Result<()> {
+    match command {
+        Command::Copy(copy_args) => {
+            init_copy_logging(args.color, copy_args.verbose);
+            load_cli_plugins(&args.plugins)?;
+            run_copy(copy_args, StopWhen::SourceDrained).await
+        }
+        Command::AgentListen(listen_args) => {
+            init_copy_logging(args.color, listen_args.verbose);
+            load_cli_plugins(&args.plugins)?;
+            run_agent_listen(listen_args).await
+        }
+        Command::Mcp(mcp_args) => {
+            // The install actions configure clients and exit; only the bare
+            // `mcp` command actually serves.
+            match mcp_args.action {
+                Some(McpAction::Install {
+                    client,
+                    local,
+                    print_config,
+                    agent_bus,
+                }) => {
+                    return if print_config {
+                        mcp_install::print_config(agent_bus)
+                    } else {
+                        mcp_install::install(client, local, agent_bus)
+                    };
+                }
+                Some(McpAction::Uninstall { client, local }) => {
+                    return mcp_install::uninstall(client, local);
+                }
+                Some(McpAction::Status { local }) => return mcp_install::status(local),
+                None => {}
+            }
+
+            // stdio transport uses stdout as the MCP channel, so logs must go to stderr.
+            init_mcp_logging(args.color);
+            load_cli_plugins(&args.plugins)?;
+            let workspace_path = config_file_path(args.config);
+            mcp::run(
+                mcp_args.transport,
+                mcp_args.bind,
+                mcp_args.report_to_ui && !mcp_args.no_report_to_ui,
+                mcp_args.agent_bus,
+                workspace_path,
+            )
+            .await
+        }
+        Command::Checkpoint(checkpoint_args) => {
+            init_copy_logging(args.color, checkpoint_args.verbose());
+            load_cli_plugins(&args.plugins)?;
+            checkpoint_cmd::run(checkpoint_args, args.config, args.config_str).await
+        }
+        Command::Status(status_args) => status_cmd::run(status_args, args.color).await,
+        Command::List(list_args) => {
+            init_copy_logging(args.color, false);
+            load_cli_plugins(&args.plugins)?;
+            catalog_cmd::list(list_args)
+        }
+        Command::Describe(describe_args) => {
+            init_copy_logging(args.color, false);
+            load_cli_plugins(&args.plugins)?;
+            catalog_cmd::describe(describe_args)
+        }
+        Command::ToCli => {
+            let (config, _) = load_config(
+                args.config,
+                args.init_config,
+                args.init_config_str,
+                args.config_str,
+            )
+            .context("Failed to load configuration")?;
+            let export = mq_bridge_app::cli_command::inline_config_command(&config)?;
+            println!("{}", export.command);
+            if !export.required_env.is_empty() {
+                eprintln!(
+                    "Required environment variables: {}",
+                    export.required_env.join(", ")
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+/// `--schema`: writes the config JSON schema to the path, or to stdout for `-`.
+fn write_schema(schema_path: &str) -> anyhow::Result<()> {
+    mq_bridge_app::plugins::discover_installed_plugins();
+    let schema = mq_bridge_app::config::app_config_schema();
+    let schema_json =
+        serde_json::to_string_pretty(&schema).context("Failed to serialize schema")?;
+
+    if schema_path == "-" {
+        println!("{}", schema_json);
+        return Ok(());
+    }
+    let path = std::path::Path::new(schema_path);
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+        && !parent.exists()
+    {
+        std::fs::create_dir_all(parent).context("Failed to create parent directory for schema")?;
+    }
+    std::fs::write(path, schema_json).context("Failed to write schema file")?;
+    Ok(())
+}
+
+/// `--drain`: every enabled route needs a source and exits once it is empty.
+fn drain_all_routes(config: &mut AppConfig) -> anyhow::Result<()> {
+    if !config.consumers.iter().any(|consumer| consumer.enabled) {
+        anyhow::bail!("--drain: the configuration defines no enabled routes");
+    }
+    if let Some(consumer) = config.consumers.iter().find(|consumer| {
+        consumer.enabled
+            && matches!(
+                consumer.endpoint.endpoint_type,
+                mq_bridge::models::EndpointType::Null
+            )
+    }) {
+        anyhow::bail!("--drain: enabled route '{}' has no source", consumer.name);
+    }
+    for consumer in &mut config.consumers {
+        consumer.options.exit_on_empty = true;
+    }
+    Ok(())
+}
+
+/// Settles the metrics and UI addresses from the flags, the config and the defaults.
+fn resolve_listen_addrs(config: &mut AppConfig, args: &Args, config_file_path: &str) {
+    // When no persisted config file exists (common in http/no-tauri dev mode), ensure
+    // UI + metrics are reachable with sane defaults.
+    let has_persisted_config = std::path::Path::new(config_file_path).exists();
+    let unconfigured = !has_persisted_config || config.consumers.is_empty();
+    let mut implicit_metrics_addr = false;
+    if let Some(addr) = &args.metrics_addr {
+        config.metrics_addr = addr.clone();
+    } else if args.no_metrics {
+        config.metrics_addr = String::new();
+    } else if unconfigured && config.metrics_addr.is_empty() {
+        config.metrics_addr = DEFAULT_METRICS_ADDR.to_string();
+        implicit_metrics_addr = true;
+    }
+    // Nobody asked for this port, so a second instance must not fail on it.
+    if implicit_metrics_addr && std::net::TcpListener::bind(DEFAULT_METRICS_ADDR).is_err() {
+        warn!(
+            "{DEFAULT_METRICS_ADDR} is in use, so the Prometheus endpoint is not served; pass --metrics-addr to serve it elsewhere"
+        );
+        config.metrics_addr = String::new();
+    }
+    // The UI is a control surface, so its port is the one address never opened
+    // implicitly: a `ui_addr` in the config counts as consent, an accidental
+    // bare run does not. `--ui` opts in even when a config leaves the address
+    // empty; `--no-ui` withdraws that consent even when the config gives one;
+    // otherwise the previously automatic default has to be confirmed.
+    //
+    // The prompt is offered only when there is nothing to run, which is the
+    // "start empty and build a config in the UI" case. A config that defines
+    // routes or consumers is a deployment: it must never stop at a question.
+    if args.no_ui || args.drain {
+        config.ui_addr = String::new();
+    } else if config.ui_addr.is_empty() {
+        // The container image sets this to every interface; a host stays on loopback.
+        let default_addr = std::env::var(DEFAULT_UI_ADDR_ENV)
+            .ok()
+            .filter(|addr| !addr.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_UI_ADDR.to_string());
+        if args.ui || (nothing_to_run(config) && ui_prompt(&default_addr)) {
+            config.ui_addr = default_addr;
+        }
+    }
+}
+
+struct Metrics {
+    prom_addr: Option<SocketAddr>,
+    handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
+    /// The exporter's own HTTP listener, when it serves on a separate port.
+    task: Option<tokio::task::AbortHandle>,
+}
+
+/// Installs the Prometheus recorder when a metrics port or the UI will read it.
+fn install_metrics(config: &AppConfig) -> anyhow::Result<Metrics> {
+    let mut prom_addr = None;
+    // Without a metrics port or UI nobody reads the recorder, and building one
+    // costs up to 200 ms of `quanta` clock calibration; the macros stay no-ops.
+    let builder = metrics_exporter_prometheus::PrometheusBuilder::new();
+    let (recorder, task) =
+        if !config.metrics_addr.is_empty() && config.metrics_addr != config.ui_addr {
+            let addr: SocketAddr = config.metrics_addr.parse().context(format!(
+                "Failed to parse metrics listen address: {}",
+                config.metrics_addr
+            ))?;
+            let (recorder, server_future) = builder.with_http_listener(addr).build()?;
+            prom_addr = Some(addr);
+            (
+                Some(recorder),
+                Some(tokio::spawn(server_future).abort_handle()),
+            )
+        } else if !config.ui_addr.is_empty() {
+            (Some(builder.build_recorder()), None)
+        } else {
+            (None, None)
+        };
+    let handle = recorder.as_ref().map(|recorder| recorder.handle());
+    if let Some(recorder) = recorder {
+        metrics::set_global_recorder(recorder).context("Failed to install Prometheus recorder")?;
+    }
+    Ok(Metrics {
+        prom_addr,
+        handle,
+        task,
+    })
+}
+
+impl Metrics {
+    fn start_upkeep(&self) {
+        // `metrics-exporter-prometheus` only drains its histogram buckets during
+        // upkeep. The `build()` (http-listener) branch in `install_metrics` spawns its own upkeep
+        // task, but `build_recorder()` does not, so without this the per-message
+        // `queue_message_processing_duration_seconds` samples recorded by mq-bridge
+        // accumulate in an unbounded AtomicBucket and slowly leak memory. Drive
+        // upkeep manually whenever we built the recorder without a listener.
+        if let (Some(upkeep_handle), None) = (self.handle.clone(), &self.task) {
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+                loop {
+                    interval.tick().await;
+                    upkeep_handle.run_upkeep();
+                }
+            });
+        }
+
+        metrics::describe_gauge!(
+            "mq_bridge_app_info",
+            "Information about the mq-bridge-app application"
+        );
+        // Standard Prometheus pattern: use a fixed value of 1.0 for info metrics,
+        // encoding the actual data (version, etc.) in the labels.
+        metrics::gauge!("mq_bridge_app_info", "version" => env!("CARGO_PKG_VERSION")).set(1.0);
+    }
+}
+
+fn spawn_web_ui(
+    config: &AppConfig,
+    plugins: &[String],
+    prometheus_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
+    config_file_path: String,
+) -> anyhow::Result<tokio::task::JoinHandle<anyhow::Result<()>>> {
+    let addr = &config.ui_addr;
+    let socket_addr: SocketAddr = addr
+        .parse()
+        .with_context(|| format!("Failed to parse UI listen address: {}", addr))?;
+    let port = socket_addr.port();
+    let host = if socket_addr.ip().is_unspecified() {
+        "localhost".to_string()
+    } else {
+        socket_addr.ip().to_string()
+    };
+    println!(
+        r#"      Web UI: http://{}:{}
+"#,
+        host, port
+    );
+    info!(
+        "Prometheus metrics enabled on Web UI (http://{}/metrics)",
+        config.ui_addr
+    );
+    if !socket_addr.ip().is_loopback() {
+        warn!(
+            "The web UI has no login and listens on {}: anyone who can reach that address can read and change the configuration, secrets included",
+            config.ui_addr
+        );
+    }
+
+    let web_ui_server = web_ui::start_web_server(
+        addr.into(),
+        config.clone(),
+        plugins.to_vec(),
+        prometheus_handle,
+        config_file_path,
+    );
+    Ok(tokio::spawn(web_ui_server))
+}
+
+struct Headless {
+    app: UiApp,
+    status: Option<StatusLease>,
+    /// Set when every enabled route drains: how many of them failed to start.
+    drain_job: Option<usize>,
+}
+
+/// Without a UI nobody else owns what the config describes, so the consumers start here.
+async fn start_headless(
+    config: &AppConfig,
+    prometheus_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
+    config_file_path: String,
+    plugins: &[String],
+) -> anyhow::Result<Headless> {
+    println!(
+        r#"        Starting without UI server
+"#
+    );
+    let workspace_path = config_file_path.clone();
+    let app = UiApp::new_with_startup_plugins(
+        config.clone(),
+        prometheus_handle,
+        config_file_path,
+        plugins,
+    )?
+    .with_instance_kind(InstanceKind::Cli);
+    let status = cli_status_lease(workspace_path, config.clone(), app.clone());
+    let enabled_consumers = config
+        .consumers
+        .iter()
+        .filter(|consumer| consumer.enabled)
+        .count();
+    let started_consumers = app.start_configured_consumers().await;
+    if started_consumers < enabled_consumers {
+        warn!("Started {started_consumers} of {enabled_consumers} enabled consumers");
+    }
+    if enabled_consumers > 0 && started_consumers == 0 {
+        anyhow::bail!("none of the {enabled_consumers} enabled consumers could be started");
+    }
+    // Every enabled route drains, so the run is a batch job that ends with them.
+    let all_drain = config
+        .consumers
+        .iter()
+        .filter(|consumer| consumer.enabled)
+        .all(|consumer| consumer.options.exit_on_empty);
+    let drain_job =
+        (enabled_consumers > 0 && all_drain).then(|| enabled_consumers - started_consumers);
+    Ok(Headless {
+        app,
+        status,
+        drain_job,
+    })
+}
+
+async fn stop_all_routes() {
     let shutdown_task = async {
         let stopped = mq_bridge::shutdown::stop_all_routes().await;
         if !stopped.is_empty() {
@@ -926,22 +1015,6 @@ async fn main() -> anyhow::Result<()> {
     } else {
         info!("All routes stopped gracefully.");
     }
-
-    // Abort the metrics task if it's running. It doesn't support graceful shutdown.
-    if let Some(task) = metrics_task {
-        task.abort();
-    }
-
-    if let Some(handle) = web_ui_handle {
-        handle.abort();
-    }
-
-    #[cfg(feature = "otel")]
-    drop(otel_guard);
-
-    info!("Shutdown complete.");
-
-    drained
 }
 
 /// Waits until every started headless route has ended, then judges the run the
@@ -1265,6 +1338,8 @@ async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
     // drain until an attempt finds something or the budget is spent.
     let wait_until = args.wait.map(|secs| started + Duration::from_secs(secs));
     let _progress = CopyProgress::start(Arc::clone(&copied), args.verbose);
+    let rate = || throughput(&copied, &read, started);
+    let finish = |outcome, error| copy_result(outcome, error, &rate());
 
     info!(
         // Redacted: this line is the one that reaches journald, Docker logs and CI.
@@ -1322,10 +1397,9 @@ async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
                 _ = copy_interrupted() => info!("Shutdown requested; stopping listen"),
             }
             let outcome = stop_and_settle(&handle).await;
-            return copy_result(
+            return finish(
                 outcome.or(Some(RouteOutcome::Stopped)),
                 handle.status().error,
-                &throughput(&copied, &read, started),
             );
         }
 
@@ -1345,10 +1419,9 @@ async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
             // hear that from the exit status. The fallback only guards against a
             // route that outlasts `COPY_STOP_TIMEOUT` without resolving.
             let outcome = stop_and_settle(&handle).await;
-            return copy_result(
+            return finish(
                 outcome.or(Some(RouteOutcome::Stopped)),
                 handle.status().error,
-                &throughput(&copied, &read, started),
             );
         }
 
@@ -1383,21 +1456,17 @@ async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
             if atomic_load && matches!(settled, Some(RouteOutcome::Stopped)) {
                 anyhow::bail!(
                     "copy interrupted: the load was rolled back, the table is unchanged (read {})",
-                    throughput(&copied, &read, started).rows_display()
+                    rate().rows_display()
                 );
             }
             if atomic_load && settled.is_none() {
                 anyhow::bail!(
                     "copy interrupted: the route did not finish stopping, so whether the load \
                      was committed or rolled back is unknown (read {})",
-                    throughput(&copied, &read, started).rows_display()
+                    rate().rows_display()
                 );
             }
-            return copy_result(
-                settled,
-                handle.status().error,
-                &throughput(&copied, &read, started),
-            );
+            return finish(settled, handle.status().error);
         }
 
         // Drained with nothing to show and budget left: drop this route and look
@@ -1413,16 +1482,12 @@ async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
                 _ = tokio::time::sleep(COPY_WAIT_RETRY_INTERVAL) => continue,
                 _ = copy_interrupted() => {
                     info!("Shutdown requested; aborting copy");
-                    return copy_result(None, None, &throughput(&copied, &read, started));
+                    return finish(None, None);
                 }
             }
         }
 
-        return copy_result(
-            outcome,
-            handle.status().error,
-            &throughput(&copied, &read, started),
-        );
+        return finish(outcome, handle.status().error);
     }
 }
 

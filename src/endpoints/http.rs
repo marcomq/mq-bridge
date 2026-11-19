@@ -4,8 +4,7 @@
 //  git clone https://github.com/marcomq/mq-bridge
 
 use self::stream::{
-    handle_streamable_request, stream_request_format, stream_response_format,
-    HttpReceiveStreamConfig, PublishResponseStreamError,
+    handle_streamable_request, stream_format, HttpReceiveStreamConfig, PublishResponseStreamError,
 };
 use crate::canonical_message::parse_message_id;
 use crate::canonical_message::tracing_support::LazyMessageIds;
@@ -1468,6 +1467,218 @@ async fn handle_request(
     }
 }
 
+fn route_miss_response(
+    miss: RouteMatchResult,
+    method: &hyper::Method,
+    accepts_text: bool,
+) -> Response<BoxBody> {
+    let allowed_methods = match miss {
+        RouteMatchResult::MethodNotAllowed(allowed_methods) => allowed_methods,
+        RouteMatchResult::NotFound => {
+            return text_error_response(
+                StatusCode::NOT_FOUND,
+                "No HTTP consumer registered for this path",
+                accepts_text,
+                None,
+            )
+        }
+        RouteMatchResult::Matched(_) => unreachable!("a matched route is not a miss"),
+    };
+    let mut headers = HashMap::new();
+    if !allowed_methods.is_empty() {
+        headers.insert(
+            "Allow".to_string(),
+            allowed_methods
+                .iter()
+                .map(hyper::Method::as_str)
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+    }
+    text_error_response(
+        StatusCode::METHOD_NOT_ALLOWED,
+        format!("Method {} not allowed", method),
+        accepts_text,
+        Some(&headers),
+    )
+}
+
+/// The request's metadata (method, path, TLS info, forwarded headers) and its `content-encoding`.
+fn request_metadata(
+    parts: &hyper::http::request::Parts,
+    conn_info: &HttpConnInfo,
+    state: &HttpConsumerState,
+) -> (HashMap<String, String>, Option<String>) {
+    let mut metadata = HashMap::with_capacity(parts.headers.len() + 6);
+    let mut content_encoding = None;
+
+    metadata.extend([
+        (HTTP_METHOD.to_string(), parts.method.to_string()),
+        (HTTP_PATH.to_string(), parts.uri.path().to_string()),
+        (
+            HTTP_QUERY.to_string(),
+            parts.uri.query().unwrap_or("").to_string(),
+        ),
+        (
+            HTTP_VERSION.to_string(),
+            http_version_str(parts.version).to_string(),
+        ),
+    ]);
+
+    if let Some(cs) = conn_info.cipher_suite.as_ref() {
+        metadata.insert("tls_cipher_suite".to_string(), cs.clone());
+    }
+    if let Some(pv) = conn_info.protocol_version.as_ref() {
+        metadata.insert("tls_protocol_version".to_string(), pv.clone());
+    }
+
+    for (key, value) in &parts.headers {
+        let Ok(v_str) = value.to_str() else {
+            continue;
+        };
+        if key.as_str().eq_ignore_ascii_case("content-encoding") {
+            content_encoding = Some(v_str.to_string());
+        }
+        if let Some(allowed) = &state.forward_headers {
+            if !allowed.contains(key) {
+                continue;
+            }
+        }
+        let k_str = key.as_str();
+        // `mqb.src.*` is reserved for framework provenance, so a request header may never
+        // supply one: without this a client could forge its own `mqb.src.http_authorization`.
+        if k_str == HTTP_METHOD
+            || k_str == HTTP_PATH
+            || k_str == HTTP_QUERY
+            || k_str == HTTP_VERSION
+            || k_str.eq_ignore_ascii_case("tls_cipher_suite")
+            || k_str.eq_ignore_ascii_case("tls_protocol_version")
+            || crate::canonical_message::is_source_metadata_key(k_str)
+        {
+            continue;
+        }
+        if is_sensitive_request_header(k_str) {
+            metadata.insert(
+                format!("{SENSITIVE_HEADER_METADATA_PREFIX}{k_str}"),
+                v_str.to_string(),
+            );
+            continue;
+        }
+        metadata.insert(k_str.to_string(), v_str.to_string());
+    }
+    (metadata, content_encoding)
+}
+
+/// Collects and decompresses the body; a too large, malformed or slow body is a 4xx response.
+async fn read_request_body(
+    body: Incoming,
+    content_encoding: Option<&str>,
+    state: &HttpConsumerState,
+    accepts_text: bool,
+) -> Result<Bytes, Box<Response<BoxBody>>> {
+    // Read body with a timeout to prevent hanging on abandoned client connections.
+    // This prevents "zombie" tasks from saturating the runtime during retry storms.
+    let limited = http_body_util::Limited::new(
+        body,
+        usize::try_from(state.max_body_bytes).unwrap_or(usize::MAX),
+    );
+    let body_bytes = match tokio::time::timeout(state.request_timeout, limited.collect()).await {
+        Ok(Ok(b)) => b.to_bytes(),
+        Ok(Err(e))
+            if e.downcast_ref::<http_body_util::LengthLimitError>()
+                .is_some() =>
+        {
+            return Err(Box::new(text_error_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!(
+                    "Request body exceeds maximum of {} bytes",
+                    state.max_body_bytes
+                ),
+                accepts_text,
+                None,
+            )));
+        }
+        Ok(Err(e)) => {
+            return Err(Box::new(text_error_response(
+                StatusCode::BAD_REQUEST,
+                format!("Failed to read body: {}", e),
+                accepts_text,
+                None,
+            )));
+        }
+        Err(_) => {
+            return Err(Box::new(text_error_response(
+                StatusCode::REQUEST_TIMEOUT,
+                "Timed out reading request body",
+                accepts_text,
+                None,
+            )));
+        }
+    };
+
+    // A malformed or oversized client-controlled body is a client error (4xx), not a
+    // server failure, so it does not bubble up to handle_request's 500 handler.
+    decompress_if_needed(body_bytes, content_encoding, state.max_body_bytes).map_err(|e| {
+        let status = if e.downcast_ref::<DecompressedBodyTooLarge>().is_some() {
+            StatusCode::PAYLOAD_TOO_LARGE
+        } else {
+            StatusCode::BAD_REQUEST
+        };
+        Box::new(text_error_response(
+            status,
+            format!("Failed to decompress request body: {}", e),
+            accepts_text,
+            None,
+        ))
+    })
+}
+
+/// Sends the message straight to the route's inline publisher and answers with its result.
+async fn send_inline(
+    inline_publisher: &Arc<dyn MessagePublisher>,
+    message: CanonicalMessage,
+    state: &HttpConsumerState,
+    response_compression: Compression,
+    accepts_text: bool,
+    request_metadata_view: &RequestMetadataView<'_>,
+) -> anyhow::Result<Response<BoxBody>> {
+    let timeout_duration = state.request_timeout;
+    tracing::trace!(
+        timeout_ms = timeout_duration.as_millis(),
+        "HTTP handler waiting for inline publisher response"
+    );
+    let disposition =
+        match tokio::time::timeout(timeout_duration, inline_publisher.send(message)).await {
+            Ok(Ok(Sent::Response(response))) => MessageDisposition::Reply(response),
+            Ok(Ok(Sent::Ack)) => MessageDisposition::Ack,
+            Ok(Err(err)) => {
+                tracing::warn!("HTTP inline publisher failed: {}", err);
+                MessageDisposition::Nack
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "HTTP handler: inline request timed out after {} ms",
+                    timeout_duration.as_millis()
+                );
+                return Ok(text_error_response(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "Request timed out",
+                    accepts_text,
+                    Some(&state.custom_headers),
+                ));
+            }
+        };
+
+    make_response(
+        disposition,
+        response_compression,
+        state.compression_threshold_bytes,
+        &state.custom_headers,
+        accepts_text,
+        Some(request_metadata_view),
+    )
+}
+
 async fn handle_request_internal(
     router: Arc<SharedHttpRouter>,
     conn_info: HttpConnInfo,
@@ -1476,33 +1687,7 @@ async fn handle_request_internal(
 ) -> anyhow::Result<Response<BoxBody>> {
     let state = match router.match_route(req.uri().path(), req.method())? {
         RouteMatchResult::Matched(state) => state,
-        RouteMatchResult::MethodNotAllowed(allowed_methods) => {
-            let mut headers = HashMap::new();
-            if !allowed_methods.is_empty() {
-                headers.insert(
-                    "Allow".to_string(),
-                    allowed_methods
-                        .iter()
-                        .map(hyper::Method::as_str)
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                );
-            }
-            return Ok(text_error_response(
-                StatusCode::METHOD_NOT_ALLOWED,
-                format!("Method {} not allowed", req.method()),
-                accepts_text,
-                Some(&headers),
-            ));
-        }
-        RouteMatchResult::NotFound => {
-            return Ok(text_error_response(
-                StatusCode::NOT_FOUND,
-                "No HTTP consumer registered for this path",
-                accepts_text,
-                None,
-            ));
-        }
+        miss => return Ok(route_miss_response(miss, req.method(), accepts_text)),
     };
 
     // Acquire a permit to limit concurrent requests and prevent resource exhaustion.
@@ -1561,63 +1746,7 @@ async fn handle_request_internal(
         .and_then(|value| value.to_str().ok())
         .and_then(|s| parse_message_id(s).or_else(|| u128::from_str_radix(s, 16).ok()));
 
-    // Extract metadata before consuming body
-    let mut metadata = HashMap::with_capacity(parts.headers.len() + 6);
-    let mut content_encoding = None;
-
-    metadata.extend([
-        (HTTP_METHOD.to_string(), parts.method.to_string()),
-        (HTTP_PATH.to_string(), parts.uri.path().to_string()),
-        (
-            HTTP_QUERY.to_string(),
-            parts.uri.query().unwrap_or("").to_string(),
-        ),
-        (
-            HTTP_VERSION.to_string(),
-            http_version_str(parts.version).to_string(),
-        ),
-    ]);
-
-    if let Some(cs) = conn_info.cipher_suite.as_ref() {
-        metadata.insert("tls_cipher_suite".to_string(), cs.clone());
-    }
-    if let Some(pv) = conn_info.protocol_version.as_ref() {
-        metadata.insert("tls_protocol_version".to_string(), pv.clone());
-    }
-
-    for (key, value) in &parts.headers {
-        if let Ok(v_str) = value.to_str() {
-            if key.as_str().eq_ignore_ascii_case("content-encoding") {
-                content_encoding = Some(v_str.to_string());
-            }
-            if let Some(allowed) = &state.forward_headers {
-                if !allowed.contains(key) {
-                    continue;
-                }
-            }
-            let k_str = key.as_str();
-            // `mqb.src.*` is reserved for framework provenance, so a request header may never
-            // supply one: without this a client could forge its own `mqb.src.http_authorization`.
-            if k_str == HTTP_METHOD
-                || k_str == HTTP_PATH
-                || k_str == HTTP_QUERY
-                || k_str == HTTP_VERSION
-                || k_str.eq_ignore_ascii_case("tls_cipher_suite")
-                || k_str.eq_ignore_ascii_case("tls_protocol_version")
-                || crate::canonical_message::is_source_metadata_key(k_str)
-            {
-                continue;
-            }
-            if is_sensitive_request_header(k_str) {
-                metadata.insert(
-                    format!("{SENSITIVE_HEADER_METADATA_PREFIX}{k_str}"),
-                    v_str.to_string(),
-                );
-                continue;
-            }
-            metadata.insert(k_str.to_string(), v_str.to_string());
-        }
-    }
+    let (metadata, content_encoding) = request_metadata(&parts, &conn_info, &state);
 
     if state.receive_streamable {
         if content_encoding.is_some() {
@@ -1629,8 +1758,8 @@ async fn handle_request_internal(
             ));
         }
 
-        let request_format = stream_request_format(&parts.headers);
-        let response_format = stream_response_format(&parts.headers);
+        let request_format = stream_format(&parts.headers, "content-type");
+        let response_format = stream_format(&parts.headers, "accept");
         return handle_streamable_request(
             body,
             metadata,
@@ -1649,69 +1778,11 @@ async fn handle_request_internal(
         .await;
     }
 
-    // Read body with a timeout to prevent hanging on abandoned client connections.
-    // This prevents "zombie" tasks from saturating the runtime during retry storms.
-    let body_collect_timeout = state.request_timeout;
-    let limited = http_body_util::Limited::new(
-        body,
-        usize::try_from(state.max_body_bytes).unwrap_or(usize::MAX),
-    );
-    let body_bytes = match tokio::time::timeout(body_collect_timeout, limited.collect()).await {
-        Ok(Ok(b)) => b.to_bytes(),
-        Ok(Err(e)) => {
-            if e.downcast_ref::<http_body_util::LengthLimitError>()
-                .is_some()
-            {
-                return Ok(text_error_response(
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    format!(
-                        "Request body exceeds maximum of {} bytes",
-                        state.max_body_bytes
-                    ),
-                    accepts_text,
-                    None,
-                ));
-            }
-            return Ok(text_error_response(
-                StatusCode::BAD_REQUEST,
-                format!("Failed to read body: {}", e),
-                accepts_text,
-                None,
-            ));
-        }
-        Err(_) => {
-            return Ok(text_error_response(
-                StatusCode::REQUEST_TIMEOUT,
-                "Timed out reading request body",
-                accepts_text,
-                None,
-            ));
-        }
-    };
-
-    // Decompress if needed. A malformed or oversized client-controlled body is a client
-    // error (4xx), not a server failure — surface it as such instead of letting it bubble
-    // up to handle_request's 500 handler.
-    let payload = match decompress_if_needed(
-        body_bytes,
-        content_encoding.as_deref(),
-        state.max_body_bytes,
-    ) {
-        Ok(payload) => payload,
-        Err(e) => {
-            let status = if e.downcast_ref::<DecompressedBodyTooLarge>().is_some() {
-                StatusCode::PAYLOAD_TOO_LARGE
-            } else {
-                StatusCode::BAD_REQUEST
-            };
-            return Ok(text_error_response(
-                status,
-                format!("Failed to decompress request body: {}", e),
-                accepts_text,
-                None,
-            ));
-        }
-    };
+    let payload =
+        match read_request_body(body, content_encoding.as_deref(), &state, accepts_text).await {
+            Ok(payload) => payload,
+            Err(response) => return Ok(*response),
+        };
 
     let mut message = CanonicalMessage::new_bytes(payload, message_id);
     trace!(
@@ -1722,42 +1793,16 @@ async fn handle_request_internal(
     message = message.with_metadata(metadata);
 
     if let Some(inline_publisher) = state.inline_publisher.as_ref() {
-        let timeout_duration = state.request_timeout;
         drop(permit);
-        tracing::trace!(
-            timeout_ms = timeout_duration.as_millis(),
-            "HTTP handler waiting for inline publisher response"
-        );
-        let disposition =
-            match tokio::time::timeout(timeout_duration, inline_publisher.send(message)).await {
-                Ok(Ok(Sent::Response(response))) => MessageDisposition::Reply(response),
-                Ok(Ok(Sent::Ack)) => MessageDisposition::Ack,
-                Ok(Err(err)) => {
-                    tracing::warn!("HTTP inline publisher failed: {}", err);
-                    MessageDisposition::Nack
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        "HTTP handler: inline request timed out after {} ms",
-                        timeout_duration.as_millis()
-                    );
-                    return Ok(text_error_response(
-                        StatusCode::GATEWAY_TIMEOUT,
-                        "Request timed out",
-                        accepts_text,
-                        Some(&state.custom_headers),
-                    ));
-                }
-            };
-
-        return make_response(
-            disposition,
+        return send_inline(
+            inline_publisher,
+            message,
+            &state,
             response_compression,
-            state.compression_threshold_bytes,
-            &state.custom_headers,
             accepts_text,
-            Some(&request_metadata_view),
-        );
+            &request_metadata_view,
+        )
+        .await;
     }
 
     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<MessageDisposition>();

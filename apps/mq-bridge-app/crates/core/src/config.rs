@@ -882,21 +882,13 @@ fn load_config_internal(
         config_path.unwrap_or_else(|| "config.yml".to_string())
     };
 
-    let init_config_path = if use_env_overrides {
-        init_config_path.or_else(|| std::env::var("INIT_CONFIG_FILE").ok())
-    } else {
-        init_config_path
+    let env_or = |value: Option<String>, var: &str| match value {
+        None if use_env_overrides => std::env::var(var).ok(),
+        value => value,
     };
-    let init_config_str = if use_env_overrides {
-        init_config_str.or_else(|| std::env::var("INIT_CONFIG_STRING").ok())
-    } else {
-        init_config_str
-    };
-    let config_str = if use_env_overrides {
-        config_str.or_else(|| std::env::var("CONFIG_STRING").ok())
-    } else {
-        config_str
-    };
+    let init_config_path = env_or(init_config_path, "INIT_CONFIG_FILE");
+    let init_config_str = env_or(init_config_str, "INIT_CONFIG_STRING");
+    let config_str = env_or(config_str, "CONFIG_STRING");
 
     let mut builder = Config::builder().set_default("log_level", "info")?;
 

@@ -1,3 +1,4 @@
+use super::cursor::{pg_rfc3339, SqlCursor};
 use super::*;
 use crate::traits::{MessageConsumer, MessagePublisher};
 use tempfile::tempdir;

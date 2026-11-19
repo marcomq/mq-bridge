@@ -761,39 +761,3 @@ export async function importFromJsonText(
 
   return { importedPresetCount, importedKind, configName: currentConfig?.name };
 }
-
-export async function importPostmanFromJsonText(text: string, targetPublisherName: string) {
-  const result = await importFromJsonText(text, {
-    includeConfig: false,
-    includePresets: true,
-    targetPublisherName,
-  });
-  if (result.importedKind !== "postman") {
-    throw new Error("Selected file is not a valid Postman collection JSON.");
-  }
-  return result;
-}
-
-export async function importOpenApiFromJsonText(text: string, targetPublisherName: string) {
-  const result = await importFromJsonText(text, {
-    includeConfig: false,
-    includePresets: true,
-    targetPublisherName,
-  });
-  if (result.importedKind !== "openapi") {
-    throw new Error("Selected file is not a valid OpenAPI JSON document.");
-  }
-  return result;
-}
-
-export async function importAsyncApiFromJsonText(text: string, targetPublisherName: string) {
-  const result = await importFromJsonText(text, {
-    includeConfig: false,
-    includePresets: true,
-    targetPublisherName,
-  });
-  if (result.importedKind !== "asyncapi") {
-    throw new Error("Selected file is not a valid AsyncAPI JSON document.");
-  }
-  return result;
-}
