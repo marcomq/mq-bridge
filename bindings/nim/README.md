@@ -24,8 +24,9 @@ cd mq-bridge/bindings/nim && nimble install
 `nim c -r app.nim` works with no further step. Prebuilt libraries exist for Linux
 x86_64 and arm64, macOS arm64 and Windows x86_64; it needs `curl` and `tar`. In a
 checkout without installing, `nimble getlib` does the same download, and replaces a
-library it downloaded for an older release. To skip it, set `MQB_SKIP_LIB_DOWNLOAD=1`;
-a library you copied into `src/lib/` yourself is never replaced.
+library it downloaded for an older release. To skip it, set `MQB_SKIP_LIB_DOWNLOAD=1`.
+A library you copied into `src/lib/` yourself is kept, unless it replaced a downloaded
+one: then delete its `.version` file next to it, or a later download overwrites it.
 
 To build the library yourself instead, e.g. with fewer endpoints, run from the
 repository root:

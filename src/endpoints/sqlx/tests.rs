@@ -36,6 +36,12 @@ fn only_an_enforcing_ssl_mode_counts_as_encrypted() {
     assert!(!enforces("mysql://db/app?encrypt=strict"));
     assert!(!enforces("mssql://db/app?sslmode=require"));
     assert!(!enforces("sqlserver://db/app?ssl-mode=VERIFY_IDENTITY"));
+    // Keys the driver ignores neither enforce TLS nor override an earlier mode.
+    assert!(!enforces("mysql://db/app?SSL-MODE=REQUIRED"));
+    assert!(!enforces("postgres://db/app?ssl_mode=require"));
+    assert!(enforces(
+        "mysql://db/app?ssl-mode=REQUIRED&SSL-MODE=PREFERRED"
+    ));
 }
 
 #[test]

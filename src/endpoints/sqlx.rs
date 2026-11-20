@@ -181,11 +181,10 @@ fn url_enforces_tls(url: &url::Url) -> bool {
     url.query_pairs()
         .filter_map(|(key, value)| {
             let value = value.to_ascii_lowercase();
-            match (scheme, key.to_ascii_lowercase().as_str()) {
-                (
-                    "postgres" | "postgresql" | "mysql" | "mariadb",
-                    "sslmode" | "ssl-mode" | "ssl_mode",
-                ) => Some(value.starts_with("verify") || value.starts_with("require")),
+            match (scheme, key.as_ref()) {
+                ("postgres" | "postgresql" | "mysql" | "mariadb", "sslmode" | "ssl-mode") => {
+                    Some(value.starts_with("verify") || value.starts_with("require"))
+                }
                 ("mssql" | "sqlserver", "encrypt") => Some(value == "true" || value == "strict"),
                 _ => None,
             }
