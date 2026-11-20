@@ -1,11 +1,10 @@
 //! `columns: auto`: write each top-level JSON field into the table column of the same name.
 
 use super::{
-    audited_sql, bind_key, bind_value, classify_sql_error, copy_rows, copy_rows_on, load::HeldTx,
-    open_copy_pool, positional_placeholder, push_copy_value, quote_ident_for, AnyQuery, BindValue,
-    CopyPool, MYSQL_COLUMN_TYPES_SQL, SQLITE_COLUMN_TYPES_SQL,
+    audited_sql, bind_key, bind_value, classify_sql_error, copy_rows, copy_rows_on, invalid,
+    load::HeldTx, open_copy_pool, positional_placeholder, push_copy_value, quote_ident_for,
+    AnyQuery, BindValue, CopyPool, MYSQL_COLUMN_TYPES_SQL, SQLITE_COLUMN_TYPES_SQL,
 };
-use crate::errors::InvalidConfig;
 use crate::models::SqlxConfig;
 use crate::outcomes::SentBatch;
 use crate::traits::PublisherError;
@@ -133,10 +132,6 @@ impl<'de> Deserialize<'de> for Fields<'de> {
         }
         deserializer.deserialize_map(FieldsVisitor)
     }
-}
-
-fn invalid(message: String) -> anyhow::Error {
-    anyhow!(InvalidConfig(anyhow!(message)))
 }
 
 fn split_table(table: &str, quote: char, default_schema: &str) -> (String, String) {
@@ -271,12 +266,12 @@ impl AutoColumns {
         let table = &config.table;
         if config.insert_query.is_some() {
             return Err(invalid(
-                "`columns` and `insert_query` both say how a row is written; set only one".into(),
+                "`columns` and `insert_query` both say how a row is written; set only one",
             ));
         }
         if config.auto_create_table {
             return Err(invalid(
-                "`columns: auto` writes into an existing table; `auto_create_table` creates the single-`payload` queue table. Create the table, or drop one of the two".into(),
+                "`columns: auto` writes into an existing table; `auto_create_table` creates the single-`payload` queue table. Create the table, or drop one of the two",
             ));
         }
         let (sql, binds) = match driver_name {
@@ -391,7 +386,7 @@ impl AutoColumns {
             }
             if !key.is_empty() {
                 return Err(invalid(
-                    "bulk_copy cannot update existing rows (COPY has no ON CONFLICT); drop `key` or `bulk_copy`".into(),
+                    "bulk_copy cannot update existing rows (COPY has no ON CONFLICT); drop `key` or `bulk_copy`",
                 ));
             }
             Some(open_copy_pool(config).await?)

@@ -7,8 +7,11 @@ use std::process::{Command, Output};
 
 // ---------------------------------------------------------------- CLI driving
 
+/// The binary under test; `MQB_TEST_BIN` points the suite at another build, such as an
+/// older release.
 pub fn cli() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_mq-bridge-app"))
+    let built = || env!("CARGO_BIN_EXE_mq-bridge-app").into();
+    Command::new(std::env::var_os("MQB_TEST_BIN").unwrap_or_else(built))
 }
 
 pub fn copy_with_options(from: &str, to: &str, options: &[&str]) -> Output {

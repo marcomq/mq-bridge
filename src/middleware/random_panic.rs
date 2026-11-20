@@ -9,6 +9,17 @@ use std::any::Any;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+/// Counts the message; true on every message, or only on the `trigger_on_message`th.
+fn should_trigger_fault(config: &RandomPanicMiddleware) -> bool {
+    if !config.enabled {
+        return false;
+    }
+    let count = config.message_count.fetch_add(1, Ordering::SeqCst) + 1;
+    config
+        .trigger_on_message
+        .is_none_or(|trigger_on| count == trigger_on)
+}
+
 /// Wrapper around a `MessageConsumer` that injects faults for testing.
 pub struct RandomPanicConsumer {
     inner: Box<dyn MessageConsumer>,
@@ -20,22 +31,6 @@ impl RandomPanicConsumer {
         Self {
             inner,
             config: Arc::new(config.clone()),
-        }
-    }
-
-    /// Check if we should trigger a fault based on the configuration.
-    fn should_trigger_fault(&self) -> bool {
-        if !self.config.enabled {
-            return false;
-        }
-
-        // If no specific trigger count is set, trigger always
-        if let Some(trigger_on) = self.config.trigger_on_message {
-            let current_count = self.config.message_count.fetch_add(1, Ordering::SeqCst) + 1;
-            current_count == trigger_on
-        } else {
-            let _ = self.config.message_count.fetch_add(1, Ordering::SeqCst);
-            true
         }
     }
 
@@ -86,7 +81,7 @@ impl MessageConsumer for RandomPanicConsumer {
     }
 
     async fn receive(&mut self) -> Result<Received, ConsumerError> {
-        if self.should_trigger_fault() {
+        if should_trigger_fault(&self.config) {
             self.inject_fault()
         } else {
             self.inner.receive().await
@@ -94,7 +89,7 @@ impl MessageConsumer for RandomPanicConsumer {
     }
 
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
-        if self.should_trigger_fault() {
+        if should_trigger_fault(&self.config) {
             match self.inject_fault() {
                 Ok(received) => {
                     // For JsonFormatError, we get a single message. We need to convert it to a batch.
@@ -130,22 +125,6 @@ impl RandomPanicPublisher {
         }
     }
 
-    /// Check if we should trigger a fault based on the configuration.
-    fn should_trigger_fault(&self) -> bool {
-        if !self.config.enabled {
-            return false;
-        }
-
-        // If no specific trigger count is set, trigger always
-        if let Some(trigger_on) = self.config.trigger_on_message {
-            let current_count = self.config.message_count.fetch_add(1, Ordering::SeqCst) + 1;
-            current_count == trigger_on
-        } else {
-            let _ = self.config.message_count.fetch_add(1, Ordering::SeqCst);
-            true
-        }
-    }
-
     /// Execute the fault injection based on the configured mode.
     fn inject_fault(&self) -> Result<Sent, PublisherError> {
         match self.config.mode {
@@ -174,7 +153,7 @@ impl RandomPanicPublisher {
 #[async_trait]
 impl MessagePublisher for RandomPanicPublisher {
     async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
-        if self.should_trigger_fault() {
+        if should_trigger_fault(&self.config) {
             self.inject_fault()
         } else {
             self.inner.send(message).await
@@ -185,7 +164,7 @@ impl MessagePublisher for RandomPanicPublisher {
         &self,
         messages: Vec<CanonicalMessage>,
     ) -> Result<SentBatch, PublisherError> {
-        if self.should_trigger_fault() {
+        if should_trigger_fault(&self.config) {
             match self.inject_fault() {
                 Ok(_) => {
                     // The fault was triggered but didn't result in an error.

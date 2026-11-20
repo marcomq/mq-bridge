@@ -3,6 +3,7 @@
 //  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
+use crate::canonical_message::parse_message_id;
 use crate::models::{TlsConfig, WebSocketConfig};
 use crate::support::redact::url_password;
 use crate::traits::{
@@ -25,7 +26,6 @@ use tokio::sync::{watch, OwnedSemaphorePermit, Semaphore};
 use tokio_rustls::TlsAcceptor;
 use tokio_websockets::{ClientBuilder, Connector, Message, ServerBuilder, WebSocketStream};
 use tracing::{debug, trace, warn};
-use uuid::Uuid;
 
 type WebSocketSourceMessage = (CanonicalMessage, CommitFunc);
 type WebSocketResponseTx = tokio::sync::mpsc::Sender<Message>;
@@ -1119,16 +1119,6 @@ fn normalize_websocket_path(path: &str) -> String {
         path.to_string()
     } else {
         format!("/{}", path)
-    }
-}
-
-fn parse_message_id(raw: &str) -> Option<u128> {
-    if let Ok(uuid) = Uuid::parse_str(raw) {
-        Some(uuid.as_u128())
-    } else if raw.starts_with("0x") || raw.starts_with("0X") {
-        u128::from_str_radix(raw.trim_start_matches("0x").trim_start_matches("0X"), 16).ok()
-    } else {
-        raw.parse::<u128>().ok()
     }
 }
 

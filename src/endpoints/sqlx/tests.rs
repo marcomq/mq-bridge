@@ -1,3 +1,4 @@
+use super::cursor::{pg_rfc3339, SqlCursor};
 use super::*;
 use crate::traits::{MessageConsumer, MessagePublisher};
 use tempfile::tempdir;
@@ -25,11 +26,22 @@ fn only_an_enforcing_ssl_mode_counts_as_encrypted() {
     assert!(!enforces("postgres://db/app"));
     assert!(!enforces("postgres://db/app?sslmode=prefer"));
     assert!(!enforces("mysql://db/app?ssl-mode=PREFERRED"));
+    // The driver applies the last value of a repeated option.
+    assert!(!enforces(
+        "mysql://db/app?ssl-mode=REQUIRED&ssl-mode=PREFERRED"
+    ));
+    assert!(enforces("postgres://db/app?sslmode=prefer&sslmode=require"));
     // An option another driver reads does not encrypt this one.
     assert!(!enforces("postgres://db/app?encrypt=true"));
     assert!(!enforces("mysql://db/app?encrypt=strict"));
     assert!(!enforces("mssql://db/app?sslmode=require"));
     assert!(!enforces("sqlserver://db/app?ssl-mode=VERIFY_IDENTITY"));
+    // Keys the driver ignores neither enforce TLS nor override an earlier mode.
+    assert!(!enforces("mysql://db/app?SSL-MODE=REQUIRED"));
+    assert!(!enforces("postgres://db/app?ssl_mode=require"));
+    assert!(enforces(
+        "mysql://db/app?ssl-mode=REQUIRED&SSL-MODE=PREFERRED"
+    ));
 }
 
 #[test]
@@ -40,11 +52,12 @@ fn copy_escape_text_escapes_control_chars() {
 
 #[test]
 fn extract_copy_columns_accepts_token_only_tuple() {
-    let cols = extract_copy_columns(
+    let (table, cols) = extract_copy_columns(
             "INSERT INTO orders (sku, qty, cust) VALUES (${payload:sku}, ${payload:qty}, ${metadata:cust})",
             3,
         )
         .unwrap();
+    assert_eq!(table, "orders");
     assert_eq!(cols, vec!["sku", "qty", "cust"]);
 }
 
@@ -61,6 +74,12 @@ fn extract_copy_columns_rejects_on_conflict_and_literals() {
     assert!(extract_copy_columns("INSERT INTO t (a, b) VALUES (${payload:a}, now())", 2,).is_err());
     // Column count must match the token count.
     assert!(extract_copy_columns("INSERT INTO t (a, b) VALUES (${payload:a})", 1).is_err());
+    // COPY writes one row per message; a second tuple would be dropped.
+    assert!(extract_copy_columns("INSERT INTO t (a) VALUES (${payload:a}), ('audit')", 1).is_err());
+    // COPY takes no alias.
+    let (table, _) =
+        extract_copy_columns("INSERT INTO s.t AS x (a) VALUES (${payload:a})", 1).unwrap();
+    assert_eq!(table, "s.t");
 }
 
 async fn setup_db_file() -> (tempfile::TempDir, String) {
@@ -798,7 +817,7 @@ fn test_resolve_source_f64_bit_exact() {
 fn test_deterministic_sqlstate_classification() {
     // Deterministic (dead-letter, never retry): syntax/type, data-exception, integrity.
     for code in [
-        "42804", "42601", "42703", "42P01", "22P02", "22003", "23505",
+        "42804", "42601", "42703", "42P01", "22P02", "22003", "23505", "21000",
     ] {
         assert!(
             is_deterministic_sqlstate(code),
@@ -2547,6 +2566,10 @@ fn mysql_with_a_ca_file_checks_the_host_name_unless_the_url_says_otherwise() {
     };
     assert_eq!(modes("mysql://db/app"), ["VERIFY_IDENTITY"]);
     assert_eq!(modes("mysql://db/app?ssl-mode=VERIFY_CA"), ["VERIFY_CA"]);
+    assert_eq!(
+        modes("mysql://db/app?ssl-mode=PREFERRED"),
+        ["PREFERRED", "VERIFY_IDENTITY"]
+    );
 }
 
 #[test]
@@ -2797,4 +2820,62 @@ async fn load_mode_route_commits_a_drain_and_needs_exit_on_empty() {
         ["a", "b"],
         "a rejected row rolls the load back"
     );
+}
+
+#[tokio::test]
+async fn test_sqlx_cursor_reader_emits_generated_columns() {
+    let (_dir, url, pool) = setup_arbitrary_table(0).await;
+    sqlx::query(
+        "CREATE TABLE priced (id INTEGER PRIMARY KEY, price INTEGER, \
+         doubled INTEGER GENERATED ALWAYS AS (price * 2) VIRTUAL)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO priced (id, price) VALUES (1, 21)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let config = SqlxConfig {
+        url,
+        table: "priced".to_string(),
+        cursor_column: Some("id".to_string()),
+        ..Default::default()
+    };
+    let mut reader = SqlxCursorReader::new(&config).await.unwrap();
+    let batch = reader.receive_batch(10).await.unwrap();
+    let row: serde_json::Value = serde_json::from_slice(&batch.messages[0].payload).unwrap();
+    assert_eq!(row["doubled"], 42, "{row}");
+}
+
+#[tokio::test]
+async fn test_sqlx_batch_keeps_every_values_tuple_per_message() {
+    for insert_query in [
+        "INSERT INTO tagged (v) VALUES (${payload:v}), ('audit')",
+        "INSERT INTO tagged (v) VALUES (${payload:v}) /* audit */ , ('audit')",
+    ] {
+        let (_dir, url, pool) = setup_arbitrary_table(0).await;
+        sqlx::query("CREATE TABLE tagged (v TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let config = SqlxConfig {
+            url,
+            table: "tagged".to_string(),
+            insert_query: Some(insert_query.to_string()),
+            ..Default::default()
+        };
+        let publisher = SqlxPublisher::new(&config).await.unwrap();
+        let messages = ["a", "b"]
+            .map(|v| CanonicalMessage::new(format!(r#"{{"v":"{v}"}}"#).into_bytes(), None));
+        publisher.send_batch(messages.to_vec()).await.unwrap();
+        let audits: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tagged WHERE v = 'audit'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            audits, 2,
+            "{insert_query}: one audit row per message, as single sends write"
+        );
+    }
 }

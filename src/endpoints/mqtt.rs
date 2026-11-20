@@ -274,7 +274,7 @@ impl MqttPublisher {
             None::<Sender<MqttInternalMessage>>,
             stop_rx,
             None,
-            !config.delayed_ack,
+            None,
             is_connected.clone(),
             confirm,
             None, // publishers don't subscribe
@@ -543,8 +543,71 @@ pub(crate) fn default_client_id(route_name: &str, publisher: bool) -> String {
     format!("{APP_NAME}-{route_name}{suffix}")
 }
 
+/// Counts the PUBACKs (PUBRECs for QoS 2) and replies queued and written, so a closing consumer
+/// flushes them: an ack still queued when the connection closes is lost and redelivered.
+#[derive(Default)]
+struct AckWrites {
+    queued: AtomicU64,
+    written: AtomicU64,
+}
+
+/// How long a closing consumer may take to write its queued acks.
+const ACK_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
+
+impl AckWrites {
+    async fn ack(&self, client: &Client, ack: &MqttAck) -> anyhow::Result<()> {
+        if matches!(ack, MqttAck::None) {
+            return Ok(());
+        }
+        self.queued.fetch_add(1, Ordering::SeqCst);
+        let result = client.ack(ack).await;
+        if result.is_err() {
+            self.queued.fetch_sub(1, Ordering::SeqCst);
+        }
+        result
+    }
+
+    async fn reply(
+        &self,
+        client: &Client,
+        reply_topic: Option<String>,
+        correlation_data: Option<String>,
+        resp: CanonicalMessage,
+    ) -> anyhow::Result<()> {
+        if reply_topic.is_none() {
+            return Ok(());
+        }
+        self.queued.fetch_add(1, Ordering::SeqCst);
+        let result = handle_mqtt_reply(client, reply_topic, correlation_data, resp).await;
+        if result.is_err() {
+            self.queued.fetch_sub(1, Ordering::SeqCst);
+        }
+        result
+    }
+
+    /// Capped at `queued`: acks of an old connection still written after `reset` must not
+    /// count for ones queued since. Only the event loop writes `written`.
+    fn record_write(&self) {
+        let next =
+            (self.written.load(Ordering::SeqCst) + 1).min(self.queued.load(Ordering::SeqCst));
+        self.written.store(next, Ordering::SeqCst);
+    }
+
+    /// A failed connection drops the PUBACKs still queued for it; waiting for them would stall.
+    /// Called on the failure, so acks queued after it, for the next connection, still count.
+    fn reset(&self) {
+        self.written
+            .fetch_max(self.queued.load(Ordering::SeqCst), Ordering::SeqCst);
+    }
+
+    fn flushed(&self) -> bool {
+        self.written.load(Ordering::SeqCst) >= self.queued.load(Ordering::SeqCst)
+    }
+}
+
 struct MqttListener {
     client: Client,
+    acks: Arc<AckWrites>,
     _stop_tx: mpsc::Sender<()>,
     message_rx: Receiver<MqttInternalMessage>,
     /// Nacked deliveries, read before `message_rx`. Bounded by the broker's inflight window.
@@ -574,12 +637,13 @@ impl MqttListener {
         let sub_info = Some((client.clone(), topic.to_string(), qos));
         // `None` = no SUBACK yet, `Some(true)` = accepted, `Some(false)` = rejected.
         let (subscribed_tx, mut subscribed_rx) = watch::channel(None);
+        let acks = Arc::new(AckWrites::default());
         tokio::spawn(run_eventloop(
             eventloop,
             Some(tx),
             stop_rx,
             sub_info,
-            !config.delayed_ack,
+            (!config.delayed_ack).then(|| acks.clone()),
             is_connected.clone(),
             None, // consumers don't publish, so there is nothing to confirm
             Some(subscribed_tx),
@@ -626,6 +690,7 @@ impl MqttListener {
         let (redeliver_tx, redeliver_rx) = async_channel::unbounded();
         Ok(Self {
             client,
+            acks,
             _stop_tx: stop_tx,
             message_rx: rx,
             redeliver_tx,
@@ -674,6 +739,7 @@ impl MessageConsumer for MqttListener {
         let message_id = message.message_id;
         let redeliver_tx = self.redeliver_tx.clone();
         let client = self.client.clone();
+        let acks = self.acks.clone();
         let reply_topic = message.get_metadata("reply_to").map(str::to_owned);
         let correlation_data = message.get_metadata("correlation_id").map(str::to_owned);
         let ack_info = internal.ack;
@@ -688,7 +754,8 @@ impl MessageConsumer for MqttListener {
                         return Ok(());
                     }
                     MessageDisposition::Reply(resp) => {
-                        handle_mqtt_reply(&client, reply_topic, correlation_data, resp).await?;
+                        acks.reply(&client, reply_topic, correlation_data, resp)
+                            .await?;
                         // Fallthrough to Ack
                     }
                     MessageDisposition::Ack => {
@@ -697,7 +764,7 @@ impl MessageConsumer for MqttListener {
                 }
 
                 // Acknowledge the original message
-                if let Err(e) = client.ack(&ack_info).await {
+                if let Err(e) = acks.ack(&client, &ack_info).await {
                     error!("Failed to ack MQTT message: {}", e);
                     return Err(anyhow!("Failed to ack MQTT message: {}", e));
                 }
@@ -757,6 +824,7 @@ impl MessageConsumer for MqttListener {
             .collect();
         let redeliver_tx = self.redeliver_tx.clone();
         let client = self.client.clone();
+        let ack_writes = self.acks.clone();
         let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
             Box::pin(async move {
                 // Length check to avoid silent truncation
@@ -773,20 +841,24 @@ impl MessageConsumer for MqttListener {
                 {
                     let client = client.clone();
                     let redeliver_tx = redeliver_tx.clone();
+                    let ack_writes = ack_writes.clone();
                     ack_futures.push(async move {
                         match disposition {
                             MessageDisposition::Reply(resp) => {
-                                handle_mqtt_reply(&client, reply_topic, correlation_data, resp)
+                                ack_writes
+                                    .reply(&client, reply_topic, correlation_data, resp)
                                     .await?;
-                                client.ack(&ack).await.map_err(|e| {
+                                ack_writes.ack(&client, &ack).await.map_err(|e| {
                                     error!("Failed to ack MQTT message in batch: {}", e);
                                     anyhow!("Failed to ack MQTT message batch: {}", e)
                                 })
                             }
-                            MessageDisposition::Ack => client.ack(&ack).await.map_err(|e| {
-                                error!("Failed to ack MQTT message in batch: {}", e);
-                                e
-                            }),
+                            MessageDisposition::Ack => {
+                                ack_writes.ack(&client, &ack).await.map_err(|e| {
+                                    error!("Failed to ack MQTT message in batch: {}", e);
+                                    e
+                                })
+                            }
                             MessageDisposition::Nack => {
                                 if let Some(again) = ack.redelivery(message_id) {
                                     let _ = redeliver_tx.try_send(again);
@@ -954,7 +1026,8 @@ async fn run_eventloop(
     message_tx: Option<Sender<MqttInternalMessage>>,
     mut stop_rx: mpsc::Receiver<()>,
     subscription_info: Option<(Client, String, QoS)>,
-    manual_acks: bool,
+    // Set when the consumer acks manually.
+    acks: Option<Arc<AckWrites>>,
     is_connected: Arc<AtomicBool>,
     confirm: Option<Arc<PublishConfirm>>,
     // Reports the SUBACK outcome so `new()` can wait until the subscription is
@@ -981,9 +1054,13 @@ async fn run_eventloop(
         tokio::select! {
             _ = stop_rx.recv(), if !stopping => {
                 stopping = true;
-                // Run for a bit longer to flush outgoing messages (like ACKs or replies)
-                flush_timeout = Box::pin(tokio::time::sleep(Duration::from_millis(100)));
-                debug!("MQTT client dropped, flushing event loop for 100ms");
+                if acks.as_ref().is_some_and(|acks| acks.flushed()) {
+                    break;
+                }
+                // Run a bit longer to flush outgoing packets (acks, replies).
+                let flush = if acks.is_some() { ACK_FLUSH_TIMEOUT } else { Duration::from_millis(100) };
+                flush_timeout = Box::pin(tokio::time::sleep(flush));
+                debug!("MQTT client dropped, flushing event loop for up to {flush:?}");
             }
             _ = &mut flush_timeout, if stopping => {
                 debug!("MQTT event loop flush complete, exiting");
@@ -998,14 +1075,14 @@ async fn run_eventloop(
                                     if let Some(tx) = &message_tx {
                                         let topic = p.topic.clone();
                                         let msg = publish_to_canonical_message_v3(&p);
-                                        let ack = if manual_acks && p.qos != QoS::AtMostOnce { MqttAck::V3(p) } else { MqttAck::None };
+                                        let ack = if acks.is_some() && p.qos != QoS::AtMostOnce { MqttAck::V3(p) } else { MqttAck::None };
                                         let internal = MqttInternalMessage {
                                             msg, ack
                                         };
                                         trace!(message_id = %format!("{:032x}", internal.msg.message_id), %topic, "Received MQTT v3 message");
-                                        if tx.send(internal).await.is_err() {
-                                            break;
-                                        }
+                                        // A closed receiver means the consumer is closing: unacked, the
+                                        // broker redelivers it, and the stop branch ends the loop.
+                                        let _ = tx.send(internal).await;
                                     }
                                 }
                                 rumqttc::Incoming::ConnAck(ack) => {
@@ -1071,20 +1148,30 @@ async fn run_eventloop(
                             {
                                 outstanding_pkids.insert(pkid);
                             }
+                            EventWrapper::V3(rumqttc::Event::Outgoing(
+                                rumqttc::Outgoing::Publish(_)
+                                | rumqttc::Outgoing::PubAck(_)
+                                | rumqttc::Outgoing::PubRec(_),
+                            )) => {
+                                if let Some(acks) = &acks {
+                                    acks.record_write();
+                                    if stopping && acks.flushed() {
+                                        break;
+                                    }
+                                }
+                            }
                             EventWrapper::V5(event_box) => {
                                 match *event_box {
                                     rumqttc::v5::Event::Incoming(rumqttc::v5::Incoming::Publish(p)) => {
                                         if let Some(tx) = &message_tx {
                                             let topic_bytes = p.topic.clone();
                                             let msg = publish_to_canonical_message_v5(&p);
-                                            let ack = if manual_acks && p.qos != QoSV5::AtMostOnce { MqttAck::V5(p) } else { MqttAck::None };
+                                            let ack = if acks.is_some() && p.qos != QoSV5::AtMostOnce { MqttAck::V5(p) } else { MqttAck::None };
                                             let internal = MqttInternalMessage {
                                                 msg, ack
                                             };
                                             trace!(message_id = %format!("{:032x}", internal.msg.message_id), topic = %String::from_utf8_lossy(&topic_bytes), "Received MQTT v5 message");
-                                            if tx.send(internal).await.is_err() {
-                                                break;
-                                            }
+                                            let _ = tx.send(internal).await;
                                         }
                                     }
                                     rumqttc::v5::Event::Incoming(rumqttc::v5::Incoming::ConnAck(ack)) => {
@@ -1148,6 +1235,18 @@ async fn run_eventloop(
                                     {
                                         outstanding_pkids.insert(pkid);
                                     }
+                                    rumqttc::v5::Event::Outgoing(
+                                        rumqttc::Outgoing::Publish(_)
+                                        | rumqttc::Outgoing::PubAck(_)
+                                        | rumqttc::Outgoing::PubRec(_),
+                                    ) => {
+                                        if let Some(acks) = &acks {
+                                            acks.record_write();
+                                            if stopping && acks.flushed() {
+                                                break;
+                                            }
+                                        }
+                                    }
                                     _ => {}
                                 }
                             }
@@ -1156,6 +1255,9 @@ async fn run_eventloop(
                     }
                     Err(e) => {
                         is_connected.store(false, Ordering::Relaxed);
+                        if let Some(acks) = &acks {
+                            acks.reset();
+                        }
                         error!("MQTT EventLoop error: {}. Reconnecting...", e);
                         tokio::time::sleep(Duration::from_secs(1)).await;
                     }

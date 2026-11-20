@@ -191,6 +191,23 @@ fn decode(frame: &[u8]) -> Result<Vec<CanonicalMessage>> {
         .map_err(|e| anyhow!("Failed to decode IPC batch ({} bytes): {}", frame.len(), e))
 }
 
+/// Whether a read error means the peer hung up (so the server re-accepts) rather than a
+/// fatal fault.
+pub(super) fn is_disconnected(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|io_error| {
+            matches!(
+                io_error.kind(),
+                std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::NotConnected
+            )
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

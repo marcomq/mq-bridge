@@ -24,7 +24,7 @@ page is a short orientation.
 ## Adding an endpoint or middleware
 
 - Add files under `src/endpoints/` or `src/middleware/`.
-- Update the factory functions in the relevant `mod.rs`.
+- Update the factory functions in `src/endpoints.rs` or `src/middleware.rs`.
 - Add configuration models to `src/models.rs`.
 - Add/adjust unit tests in the module, and integration tests under
   `tests/integration/` where applicable.

@@ -1396,14 +1396,44 @@ fn record_partition_eof(
 type BatchOffsets = Vec<(String, i32, i64)>;
 
 /// Records the offset to commit for one message, keeping only the latest per partition.
-fn record_offset(offsets: &mut BatchOffsets, topic: &str, partition: i32, offset: i64) {
+/// Returns the partition's index in `offsets`.
+fn record_offset(offsets: &mut BatchOffsets, topic: &str, partition: i32, offset: i64) -> usize {
     match offsets
-        .iter_mut()
-        .find(|(t, p, _)| *p == partition && t == topic)
+        .iter()
+        .position(|(t, p, _)| *p == partition && t == topic)
     {
-        Some(entry) => entry.2 = offset,
-        None => offsets.push((topic.to_string(), partition, offset)),
+        Some(slot) => {
+            offsets[slot].2 = offset;
+            slot
+        }
+        None => {
+            offsets.push((topic.to_string(), partition, offset));
+            offsets.len() - 1
+        }
     }
+}
+
+/// Per partition, the commit position just past the last ack before that partition's first
+/// nack, so a replay starts at the nack instead of re-delivering what was already acked.
+fn offsets_before_first_nack(
+    offsets: &BatchOffsets,
+    positions: &[(usize, i64)],
+    dispositions: &[MessageDisposition],
+) -> BatchOffsets {
+    let mut blocked = vec![false; offsets.len()];
+    let mut committable: Vec<Option<i64>> = vec![None; offsets.len()];
+    for (&(slot, offset), disposition) in positions.iter().zip(dispositions) {
+        if matches!(disposition, MessageDisposition::Nack) {
+            blocked[slot] = true;
+        } else if !blocked[slot] {
+            committable[slot] = Some(offset);
+        }
+    }
+    offsets
+        .iter()
+        .zip(committable)
+        .filter_map(|((topic, partition, _), offset)| Some((topic.clone(), *partition, offset?)))
+        .collect()
 }
 
 /// Builds the list to hand to `commit`, one entry per partition.
@@ -2044,6 +2074,8 @@ async fn await_first_within(
 struct BatchParts {
     messages: Vec<CanonicalMessage>,
     offsets: BatchOffsets,
+    /// Per message: its partition's index in `offsets` and its own commit position.
+    positions: Vec<(usize, i64)>,
     reply_infos: Vec<(Option<String>, Option<String>)>,
     /// The stream ended or failed. Surfaced only once the records already in hand have
     /// been delivered, so a failure never discards a batch that was read successfully.
@@ -2061,6 +2093,7 @@ fn assemble_batch(
     let mut parts = BatchParts {
         messages: Vec::with_capacity(max_messages),
         offsets: BatchOffsets::new(),
+        positions: Vec::with_capacity(max_messages),
         reply_infos: Vec::with_capacity(max_messages),
         terminal: None,
     };
@@ -2075,7 +2108,9 @@ fn assemble_batch(
                         .map(str::to_owned),
                 ));
                 parts.messages.push(item.message);
-                record_offset(&mut parts.offsets, &item.topic, item.partition, item.offset);
+                let slot =
+                    record_offset(&mut parts.offsets, &item.topic, item.partition, item.offset);
+                parts.positions.push((slot, item.offset));
             }
             Err(e) => {
                 parts.terminal = Some(e);
@@ -2123,6 +2158,7 @@ async fn receive_batch_internal(
     let BatchParts {
         messages,
         offsets: last_offsets,
+        positions,
         reply_infos,
         terminal,
     } = parts;
@@ -2161,10 +2197,36 @@ async fn receive_batch_internal(
             let any_nack = dispositions
                 .iter()
                 .any(|d| matches!(d, MessageDisposition::Nack));
+            // An earlier batch's nack replays this one too, so nothing of it may be committed.
+            let partial = (any_nack && !nacked.is_tripped())
+                .then(|| offsets_before_first_nack(&last_offsets, &positions, &dispositions));
 
             handle_kafka_replies(producer, &reply_infos, dispositions).await;
 
-            if any_nack {
+            if let Some(partial) = partial {
+                // Synchronous: the reconnect that follows must resume past these acks.
+                if !partial.is_empty() {
+                    let failure = match offsets_to_tpl(&partial) {
+                        Ok(tpl) => {
+                            let consumer = consumer.clone();
+                            let committed = tokio::task::spawn_blocking(move || {
+                                consumer.commit(&tpl, CommitMode::Sync)
+                            })
+                            .await;
+                            match committed {
+                                Ok(Ok(())) => None,
+                                other => Some(format!("{other:?}")),
+                            }
+                        }
+                        Err(error) => Some(format!("{error:#}")),
+                    };
+                    if let Some(error) = failure {
+                        tracing::warn!(
+                            %error,
+                            "Failed to commit the acks before a Kafka nack; they will be replayed"
+                        );
+                    }
+                }
                 nacked.trip();
             }
             if !nacked.is_tripped() && messages_len > 0 {
@@ -2295,6 +2357,35 @@ mod tests {
             .unwrap()
             .offset();
         assert_eq!(committed_offset, Offset::Offset(124));
+    }
+
+    /// Partition 0 reads A B C D E with C and E nacked: commit past B only. Partition 1 was
+    /// all acked and commits fully; partition 2 starts with a nack and commits nothing.
+    #[test]
+    fn test_offsets_before_first_nack_stop_at_each_partitions_first_nack() {
+        use MessageDisposition::{Ack, Nack};
+        let mut offsets = BatchOffsets::new();
+        let mut positions = Vec::new();
+        let mut dispositions = Vec::new();
+        for (partition, offset, disposition) in [
+            (0, 11, Ack),
+            (1, 21, Ack),
+            (0, 12, Ack),
+            (2, 31, Nack),
+            (0, 13, Nack),
+            (2, 32, Ack),
+            (0, 14, Ack),
+            (1, 22, Ack),
+            (0, 15, Nack),
+        ] {
+            let slot = record_offset(&mut offsets, "t", partition, offset);
+            positions.push((slot, offset));
+            dispositions.push(disposition);
+        }
+        assert_eq!(
+            offsets_before_first_nack(&offsets, &positions, &dispositions),
+            vec![("t".to_string(), 0, 12), ("t".to_string(), 1, 22)]
+        );
     }
 
     /// Many messages from one partition must collapse to a single entry carrying the last

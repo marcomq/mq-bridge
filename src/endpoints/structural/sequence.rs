@@ -74,7 +74,15 @@ pub struct SequenceConsumer {
     settle_timeout: Duration,
     /// A phase ended with deliveries unconfirmed: the marker is not advanced any more.
     unconfirmed: bool,
+    /// Builds a phase's consumer in place of `create_consumer_from_route`.
+    open_phase: Option<PhaseOpener>,
 }
+
+pub(crate) type PhaseFuture<'a> =
+    futures::future::BoxFuture<'a, anyhow::Result<Box<dyn MessageConsumer>>>;
+/// Builds one phase's consumer; an endpoint that expands to a `sequence` can set its own.
+pub(crate) type PhaseOpener =
+    Arc<dyn for<'a> Fn(&'a str, &'a Endpoint) -> PhaseFuture<'a> + Send + Sync>;
 
 impl SequenceConsumer {
     pub async fn new(route_name: &str, config: &SequenceConfig) -> anyhow::Result<Self> {
@@ -151,7 +159,15 @@ impl SequenceConsumer {
             unsettled: Arc::default(),
             settle_timeout: SETTLE_TIMEOUT,
             unconfirmed: false,
+            open_phase: None,
         })
+    }
+
+    // Unused in builds without an endpoint that expands to a `sequence`.
+    #[allow(dead_code)]
+    pub(crate) fn with_phase_opener(mut self, open: PhaseOpener) -> Self {
+        self.open_phase = Some(open);
+        self
     }
 
     async fn load_phase(
@@ -211,20 +227,23 @@ impl SequenceConsumer {
                     endpoint.endpoint_type.name()
                 ))
             })?;
-            let mut consumer =
-                crate::endpoints::create_consumer_from_route(&self.route_name, endpoint)
-                    .await
-                    .map_err(|e| {
-                        // Past the static check a failure is taken as transient, so the
-                        // route reconnects (STRUCT-06); `InvalidConfig` still stops it.
-                        ConsumerError::from(e.context(format!(
-                            "[route:{}] sequence phase {} of {} ({}) failed to start",
-                            self.route_name,
-                            self.phase + 1,
-                            self.endpoints.len(),
-                            endpoint.endpoint_type.name()
-                        )))
-                    })?;
+            let created = match &self.open_phase {
+                Some(open) => open(&self.route_name, endpoint).await,
+                None => {
+                    crate::endpoints::create_consumer_from_route(&self.route_name, endpoint).await
+                }
+            };
+            let mut consumer = created.map_err(|e| {
+                // Past the static check a failure is taken as transient, so the
+                // route reconnects (STRUCT-06); `InvalidConfig` still stops it.
+                ConsumerError::from(e.context(format!(
+                    "[route:{}] sequence phase {} of {} ({}) failed to start",
+                    self.route_name,
+                    self.phase + 1,
+                    self.endpoints.len(),
+                    endpoint.endpoint_type.name()
+                )))
+            })?;
             let drain = if self.is_last_phase() {
                 self.exit_on_empty
             } else {

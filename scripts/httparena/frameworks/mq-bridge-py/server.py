@@ -236,10 +236,25 @@ def _load_dataset() -> list[dict]:
 DATASET = _load_dataset()
 
 
-def _query_int(qs: dict[str, list[str]], key: str, default: int) -> int:
+def _parse_query(raw: str) -> dict[str, str]:
+    """First value per key. Plain `k=v&k=v` queries skip `parse_qs`, which costs
+    more than the rest of a baseline request; encoded ones still go through it."""
+    if not raw:
+        return {}
+    if "%" in raw or "+" in raw:
+        return {k: v[0] for k, v in parse_qs(raw).items()}
+    qs: dict[str, str] = {}
+    for pair in raw.split("&"):
+        key, _, value = pair.partition("=")
+        if value and key not in qs:
+            qs[key] = value
+    return qs
+
+
+def _query_int(qs: dict[str, str], key: str, default: int) -> int:
     try:
-        return int(qs[key][0])
-    except (KeyError, IndexError, ValueError):
+        return int(qs[key])
+    except (KeyError, ValueError):
         return default
 
 
@@ -247,7 +262,7 @@ def _dumps(obj) -> bytes:
     return _json.dumps(obj, separators=(",", ":")).encode()
 
 
-def _build_json(qs: dict[str, list[str]], count: int) -> tuple[bytes, dict]:
+def _build_json(qs: dict[str, str], count: int) -> tuple[bytes, dict]:
     """Serialized fresh per request — no response caching. mq-bridge compresses
     it per request when the client advertises an encoding, so `json` and
     `json-comp` both measure real serialization and compression work."""
@@ -351,7 +366,7 @@ def _item_row(r) -> dict:
     }
 
 
-def _async_db(qs: dict[str, list[str]]) -> tuple[bytes, dict]:
+def _async_db(qs: dict[str, str]) -> tuple[bytes, dict]:
     """A missing database is not an error here: the profile's other listeners
     have to keep serving, so an unreachable pool degrades to an empty result."""
     try:
@@ -388,7 +403,7 @@ def _crud_invalidate(item_id: int) -> None:
             pass
 
 
-def _crud_list(qs: dict[str, list[str]]) -> tuple[bytes, dict]:
+def _crud_list(qs: dict[str, str]) -> tuple[bytes, dict]:
     """One query, no `SELECT COUNT(*)`: `total` reports the rows in this
     response, which is what the profile asks for — the full-filter count was
     dropped from the spec because it dominated Postgres CPU under writes."""
@@ -397,7 +412,7 @@ def _crud_list(qs: dict[str, list[str]]) -> tuple[bytes, dict]:
     rows = _fetch(
         f"SELECT {ITEM_COLUMNS} FROM items WHERE category = %s ORDER BY id "
         "LIMIT %s OFFSET %s",
-        ((qs.get("category") or ["electronics"])[0], limit, (page - 1) * limit),
+        (qs.get("category") or "electronics", limit, (page - 1) * limit),
     )
     items = [_item_row(r) for r in rows]
     return (
@@ -550,13 +565,16 @@ def _delay(raw: str) -> tuple[bytes, dict]:
 
 # ---------- dispatch ----------
 
-def _baseline(message: Message, qs: dict[str, list[str]]) -> tuple[bytes, dict]:
+def _baseline(message: Message, qs: dict[str, str]) -> tuple[bytes, dict]:
+    return str(_query_int(qs, "a", 0) + _query_int(qs, "b", 0)).encode(), TEXT_META
+
+
+def _baseline_post(message: Message, qs: dict[str, str]) -> tuple[bytes, dict]:
     total = _query_int(qs, "a", 0) + _query_int(qs, "b", 0)
-    if message.metadata.get("http_method") == "POST":
-        try:
-            total += int(bytes(message.payload).decode().strip())
-        except (ValueError, UnicodeDecodeError):
-            pass
+    try:
+        total += int(bytes(message.payload).decode().strip())
+    except (ValueError, UnicodeDecodeError):
+        pass
     return str(total).encode(), TEXT_META
 
 
@@ -566,7 +584,7 @@ EXACT_ROUTES = {
     ("GET", "/pipeline"): lambda m, qs: (b"ok", TEXT_META),
     ("GET", "/baseline11"): _baseline,
     ("GET", "/baseline2"): _baseline,
-    ("POST", "/baseline11"): _baseline,
+    ("POST", "/baseline11"): _baseline_post,
     ("POST", "/echo"): lambda m, qs: (m.payload, OCTET_META),
     ("GET", "/async-db"): lambda m, qs: _async_db(qs),
     ("GET", "/fortunes"): lambda m, qs: _fortunes(),
@@ -607,7 +625,7 @@ def handle(message: Message) -> Message:
     meta = message.metadata
     method = meta.get("http_method", "")
     path = meta.get("http_path", "")
-    qs = parse_qs(meta.get("http_query", ""))
+    qs = _parse_query(meta.get("http_query", ""))
 
     try:
         route = EXACT_ROUTES.get((method, path))
@@ -623,7 +641,7 @@ def handle(message: Message) -> Message:
     except _DbError as exc:
         body, reply_meta = _DB_ERRORS[exc.code]
 
-    return message.__class__(body, reply_meta)
+    return Message(body, reply_meta)
 
 
 # ---------- process model ----------

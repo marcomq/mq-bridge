@@ -181,6 +181,72 @@ pub async fn test_postgres_cdc_dates_ignore_the_role_datestyle() {
     .await;
 }
 
+/// `capture_all` renders a snapshot row exactly as the CDC phase renders the same row.
+pub async fn test_postgres_cdc_capture_all_snapshot_matches_cdc_values() {
+    use mq_bridge::models::{Endpoint, EndpointType, PostgresConsume};
+    setup_logging();
+    run_test_with_docker(COMPOSE, || async {
+        let slot = "mqb_cdc_values_slot";
+        reset_schema(slot).await;
+        let mut conn = connect_retry().await;
+        for sql in [
+            "ALTER TABLE cdc_users ADD COLUMN b BYTEA, ADD COLUMN f FLOAT8, \
+             ADD COLUMN amount NUMERIC, ADD COLUMN ints INT[], ADD COLUMN nums NUMERIC[], \
+             ADD COLUMN stamps TIMESTAMPTZ[], ADD COLUMN doc JSONB",
+            "INSERT INTO cdc_users VALUES (1, 'a', '\\xdeadbeef', 'NaN', 1.50, '{1,NULL,3}', \
+             '{1.5,2}', '{\"2026-03-04 05:06:07+00\"}', '{\"k\": [1, \"x\"]}')",
+        ] {
+            sqlx::query(sql).execute(&mut conn).await.expect(sql);
+        }
+        let mut config = cfg(slot);
+        config.consume = Some(PostgresConsume::CaptureAll);
+        let endpoint = Endpoint::new(EndpointType::PostgresCdc(config));
+        let mut consumer =
+            mq_bridge::endpoints::create_consumer_from_route("cdc_values", &endpoint)
+                .await
+                .expect("create capture_all consumer");
+
+        let (mut snapshot, mut streamed) = (None, None);
+        for _ in 0..60 {
+            if streamed.is_some() {
+                break;
+            }
+            // Repeated until the CDC phase is open: a no-op update still streams the full row.
+            sqlx::query("UPDATE cdc_users SET id = id WHERE id = 1")
+                .execute(&mut conn)
+                .await
+                .expect("touch row");
+            let Ok(batch) =
+                tokio::time::timeout(Duration::from_secs(1), consumer.receive_batch(64)).await
+            else {
+                continue;
+            };
+            let batch = batch.expect("receive_batch failed");
+            let n = batch.messages.len();
+            for msg in &batch.messages {
+                let row: serde_json::Value = serde_json::from_slice(&msg.payload).expect("json");
+                match msg.get_metadata("postgres.operation") {
+                    None => snapshot = snapshot.or(Some(row)),
+                    Some(_) => streamed = streamed.or(Some(row)),
+                }
+            }
+            (batch.commit)(vec![MessageDisposition::Ack; n])
+                .await
+                .expect("commit (ack) failed");
+        }
+        let snapshot = snapshot.expect("no snapshot row");
+        assert_eq!(snapshot["b"], "3q2+7w==", "row: {snapshot}");
+        assert_eq!(snapshot["f"], "NaN", "row: {snapshot}");
+        assert_eq!(
+            snapshot["ints"],
+            serde_json::json!([1, null, 3]),
+            "row: {snapshot}"
+        );
+        assert_eq!(Some(snapshot), streamed);
+    })
+    .await;
+}
+
 /// An update that moves a row to another key: one event naming the old key, or with
 /// `split_key_change` a delete of the old key before it.
 pub async fn test_postgres_cdc_key_change() {

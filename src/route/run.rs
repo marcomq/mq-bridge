@@ -493,74 +493,8 @@ impl Route {
         sends: Option<&Arc<PendingSends>>,
         no_resume: bool,
     ) -> anyhow::Result<bool> {
-        let source_has_position = self.source_has_position();
-        let relaxed_output;
-        let output =
-            match relax_object_naming(name, source_has_position, &self.input, &self.output)? {
-                Some((endpoint, reason)) => {
-                    warn!(route = name, "{reason}");
-                    relaxed_output = endpoint;
-                    &relaxed_output
-                }
-                None => &self.output,
-            };
-        let synced_output;
-        let output = match sync_file_sinks_behind_saved_position(
-            name,
-            &self.input,
-            output,
-            source_has_position,
-            no_resume,
-        ) {
-            Some(endpoint) => {
-                synced_output = endpoint;
-                &synced_output
-            }
-            None => output,
-        };
-        let unsynced_output;
-        let output = match relax_object_store_fsync(
-            name,
-            &self.input,
-            output,
-            source_has_position,
-            no_resume,
-        ) {
-            Some(endpoint) => {
-                unsynced_output = endpoint;
-                &unsynced_output
-            }
-            None => output,
-        };
-        let source_metadata_required =
-            output_requires_source_metadata(name, output, source_has_position)?;
-        check_source_position_available(name, &self.input, source_metadata_required)?;
-        let source_metadata_required = source_metadata_required
-            || (source_has_position && output_keys_on_source_position(name, output)?);
-        let publisher =
-            create_publisher_from_route_with_source_position(name, output, source_has_position)
-                .await?;
-        let transient_failure_policy = transient_publish_failure_policy(
-            &self.input,
-            output_passes_through_http_status(name, output)?,
-        );
-        let mut consumer = create_consumer_from_route_with_policy(
-            name,
-            &self.input,
-            source_metadata_required,
-            no_resume,
-        )
-        .await?;
-        consumer.set_exit_on_empty(self.options.exit_on_empty);
-        if let Err(err) = run_publisher_connect_hook(name, &publisher).await {
-            run_publisher_disconnect_hook(name, &publisher, DisconnectOutcome::Failed).await;
-            return Err(err);
-        }
-        if let Err(err) = run_consumer_connect_hook(name, consumer.as_ref()).await {
-            run_consumer_disconnect_hook(name, consumer.as_ref()).await;
-            run_publisher_disconnect_hook(name, &publisher, DisconnectOutcome::Failed).await;
-            return Err(err);
-        }
+        let (publisher, mut consumer, transient_failure_policy) =
+            self.connect(name, no_resume).await?;
         let (err_tx, err_rx) = bounded(1);
         let commit_tasks = JoinSet::new();
 
@@ -766,88 +700,8 @@ impl Route {
         sends: Option<&Arc<PendingSends>>,
         no_resume: bool,
     ) -> anyhow::Result<bool> {
-        let source_has_position = self.source_has_position();
-        let relaxed_output;
-        let output =
-            match relax_object_naming(name, source_has_position, &self.input, &self.output)? {
-                Some((endpoint, reason)) => {
-                    warn!(route = name, "{reason}");
-                    relaxed_output = endpoint;
-                    &relaxed_output
-                }
-                None => &self.output,
-            };
-        let synced_output;
-        let output = match sync_file_sinks_behind_saved_position(
-            name,
-            &self.input,
-            output,
-            source_has_position,
-            no_resume,
-        ) {
-            Some(endpoint) => {
-                synced_output = endpoint;
-                &synced_output
-            }
-            None => output,
-        };
-        let unsynced_output;
-        let output = match relax_object_store_fsync(
-            name,
-            &self.input,
-            output,
-            source_has_position,
-            no_resume,
-        ) {
-            Some(endpoint) => {
-                unsynced_output = endpoint;
-                &unsynced_output
-            }
-            None => output,
-        };
-        let source_metadata_required =
-            output_requires_source_metadata(name, output, source_has_position)?;
-        check_source_position_available(name, &self.input, source_metadata_required)?;
-        let source_metadata_required = source_metadata_required
-            || (source_has_position && output_keys_on_source_position(name, output)?);
-        // A write-time name is minted inside the worker pool, so it is arrival order here
-        // whether or not the input could have supplied a position instead. Checked after the
-        // relaxation above, so a route it just moved onto write-time names is warned about too.
-        if output_has_write_time_named_object_store(name, output, source_has_position)? {
-            warn!(
-                route = name,
-                concurrency = self.options.concurrency,
-                "object_store sink names objects by write time, which this route's worker pool \
-                 makes arrival order rather than source order. Replaying a change stream through \
-                 the bucket can reorder updates to the same key. Set name_by: source_position \
-                 where the input carries a replay position; otherwise concurrency: 1 is the only \
-                 remedy."
-            );
-        }
-        let publisher =
-            create_publisher_from_route_with_source_position(name, output, source_has_position)
-                .await?;
-        let transient_failure_policy = transient_publish_failure_policy(
-            &self.input,
-            output_passes_through_http_status(name, output)?,
-        );
-        let mut consumer = create_consumer_from_route_with_policy(
-            name,
-            &self.input,
-            source_metadata_required,
-            no_resume,
-        )
-        .await?;
-        consumer.set_exit_on_empty(self.options.exit_on_empty);
-        if let Err(err) = run_publisher_connect_hook(name, &publisher).await {
-            run_publisher_disconnect_hook(name, &publisher, DisconnectOutcome::Failed).await;
-            return Err(err);
-        }
-        if let Err(err) = run_consumer_connect_hook(name, consumer.as_ref()).await {
-            run_consumer_disconnect_hook(name, consumer.as_ref()).await;
-            run_publisher_disconnect_hook(name, &publisher, DisconnectOutcome::Failed).await;
-            return Err(err);
-        }
+        let (publisher, mut consumer, transient_failure_policy) =
+            self.connect(name, no_resume).await?;
         if let Some(tx) = ready_tx {
             let _ = tx.send(()).await;
         }
@@ -897,20 +751,21 @@ impl Route {
         // --- Worker Pool ---
         let order_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut join_set = JoinSet::new();
+        let send_context = Arc::new(SendContext {
+            publisher: Arc::clone(&publisher),
+            has_retry_middleware: self.output_has_middleware(|m| matches!(m, Middleware::Retry(_))),
+            has_dlq_middleware: self.output_has_middleware(|m| matches!(m, Middleware::Dlq(_))),
+            transient_failure_policy,
+            err_tx: err_tx.clone(),
+            commit_semaphore: commit_semaphore.clone(),
+            drops: drops.cloned(),
+            sends: sends.cloned(),
+        });
         for i in 0..self.options.concurrency {
             let work_rx_clone = work_rx.clone();
-            let publisher = Arc::clone(&publisher);
-            let err_tx = err_tx.clone();
-            let commit_semaphore = commit_semaphore.clone();
+            let context = Arc::clone(&send_context);
             let mut commit_tasks = JoinSet::new();
-            let has_retry_middleware =
-                self.output_has_middleware(|m| matches!(m, Middleware::Retry(_)));
-            let has_dlq_middleware =
-                self.output_has_middleware(|m| matches!(m, Middleware::Dlq(_)));
             let batch_size = self.options.batch_size;
-            // Owned per worker: the borrow cannot outlive this loop iteration.
-            let drops = drops.cloned();
-            let sends = sends.cloned();
             let order_failed = Arc::clone(&order_failed);
             join_set.spawn(async move {
                 debug!("Starting worker {}", i);
@@ -922,18 +777,12 @@ impl Route {
                 while let Ok((messages, commit_func, mut ticket)) = work.0.recv().await {
                     let batch_len = messages.len();
                     if let Err(err) = send_batch_and_commit(
-                        &publisher,
+                        &context,
                         messages,
                         commit_func,
-                        has_retry_middleware,
-                        has_dlq_middleware,
-                        transient_failure_policy,
-                        &err_tx,
-                        commit_semaphore.as_ref(),
                         &mut commit_tasks,
                         &mut batch_scratch,
-                        drops.as_ref(),
-                        sends.as_deref().map(|sends| (sends, i)),
+                        i,
                         &mut ticket,
                     )
                     .await
@@ -941,7 +790,11 @@ impl Route {
                         // Before the ticket is dropped, which lets the next batch in.
                         order_failed.store(true, Ordering::Relaxed);
                         error!("Worker failed to process message batch: {}", err);
-                        report_route_error(&err_tx, err, "Could not send error to main task");
+                        report_route_error(
+                            &context.err_tx,
+                            err,
+                            "Could not send error to main task",
+                        );
                         break;
                     }
                     // Amortized cooperative yield (see YIELD_EVERY_MSGS).
@@ -1159,6 +1012,104 @@ impl Route {
             Ok(shutdown_rx.is_empty())
         };
         self.close_publisher(name, &publisher, result).await
+    }
+
+    /// Settles this run's output, then creates the publisher and consumer and runs their
+    /// connect hooks.
+    async fn connect(
+        &self,
+        name: &str,
+        no_resume: bool,
+    ) -> anyhow::Result<(
+        Arc<dyn MessagePublisher>,
+        Box<dyn MessageConsumer>,
+        TransientPublishFailurePolicy,
+    )> {
+        let source_has_position = self.source_has_position();
+        let relaxed_output;
+        let output =
+            match relax_object_naming(name, source_has_position, &self.input, &self.output)? {
+                Some((endpoint, reason)) => {
+                    warn!(route = name, "{reason}");
+                    relaxed_output = endpoint;
+                    &relaxed_output
+                }
+                None => &self.output,
+            };
+        let synced_output;
+        let output = match sync_file_sinks_behind_saved_position(
+            name,
+            &self.input,
+            output,
+            source_has_position,
+            no_resume,
+        ) {
+            Some(endpoint) => {
+                synced_output = endpoint;
+                &synced_output
+            }
+            None => output,
+        };
+        let unsynced_output;
+        let output = match relax_object_store_fsync(
+            name,
+            &self.input,
+            output,
+            source_has_position,
+            no_resume,
+        ) {
+            Some(endpoint) => {
+                unsynced_output = endpoint;
+                &unsynced_output
+            }
+            None => output,
+        };
+        let source_metadata_required =
+            output_requires_source_metadata(name, output, source_has_position)?;
+        check_source_position_available(name, &self.input, source_metadata_required)?;
+        let source_metadata_required = source_metadata_required
+            || (source_has_position && output_keys_on_source_position(name, output)?);
+        // A write-time name is minted inside the worker pool, so it is arrival order here
+        // whether or not the input could have supplied a position instead. Checked after the
+        // relaxation above, so a route it just moved onto write-time names is warned about too.
+        if self.options.concurrency > 1
+            && output_has_write_time_named_object_store(name, output, source_has_position)?
+        {
+            warn!(
+                route = name,
+                concurrency = self.options.concurrency,
+                "object_store sink names objects by write time, which this route's worker pool \
+                 makes arrival order rather than source order. Replaying a change stream through \
+                 the bucket can reorder updates to the same key. Set name_by: source_position \
+                 where the input carries a replay position; otherwise concurrency: 1 is the only \
+                 remedy."
+            );
+        }
+        let publisher =
+            create_publisher_from_route_with_source_position(name, output, source_has_position)
+                .await?;
+        let transient_failure_policy = transient_publish_failure_policy(
+            &self.input,
+            output_passes_through_http_status(name, output)?,
+        );
+        let mut consumer = create_consumer_from_route_with_policy(
+            name,
+            &self.input,
+            source_metadata_required,
+            no_resume,
+        )
+        .await?;
+        consumer.set_exit_on_empty(self.options.exit_on_empty);
+        if let Err(err) = run_publisher_connect_hook(name, &publisher).await {
+            run_publisher_disconnect_hook(name, &publisher, DisconnectOutcome::Failed).await;
+            return Err(err);
+        }
+        if let Err(err) = run_consumer_connect_hook(name, consumer.as_ref()).await {
+            run_consumer_disconnect_hook(name, consumer.as_ref()).await;
+            run_publisher_disconnect_hook(name, &publisher, DisconnectOutcome::Failed).await;
+            return Err(err);
+        }
+        Ok((publisher, consumer, transient_failure_policy))
     }
 
     /// Runs the publisher's disconnect hook. For a `load_mode` output that hook commits the

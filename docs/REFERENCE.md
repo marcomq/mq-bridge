@@ -109,7 +109,7 @@ a handler error propagates to the route and is reported there.
 > `route::tests::test_dlq_and_retry_batch_integration`,
 > `middleware::transform::tests::test_rejected_message_reaches_the_dlq_through_the_config_wiring`,
 > and `reference_docs_test::publisher_middleware_wraps_last_entry_outermost`, and is
-> documented on `apply_middlewares_to_publisher` in `src/middleware/mod.rs`.
+> documented on `apply_middlewares_to_publisher` in `src/middleware.rs`.
 
 ### What exists
 
@@ -2179,7 +2179,9 @@ input:
 ```
 
 `postgres_cdc: consume: capture_all` **expands to exactly the `sequence` below** — it reads the
-publication's tables, takes each table's primary key as the cursor, and appends the CDC phase. Use
+publication's tables, takes each table's primary key as the cursor, and appends the CDC phase. One
+difference: the expanded back fill renders values as the CDC phase does (bytea as base64, `NaN` as a
+string, arrays element by element), while a hand-written `sqlx` phase keeps the `sqlx` rendering. Use
 the explicit form only when that expansion cannot serve you:
 
 | Situation | Spelling |

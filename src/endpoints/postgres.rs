@@ -1,0 +1,1114 @@
+//! Postgres logical-replication CDC source endpoint (pgoutput).
+//!
+//! Source-only. Streams row-level changes from a Postgres logical replication
+//! slot, decodes the pgoutput protocol into flat JSON rows tagged with a
+//! `postgres.operation` marker, and maps mq-bridge's ack/nack model onto the
+//! slot's confirmed-LSN feedback:
+//!
+//! * **Ack** a batch → advance the confirmed LSN and feed it back to the server
+//!   (`standby_status_update`), so the slot's `confirmed_flush_lsn` moves forward
+//!   and WAL up to that point may be recycled.
+//! * **Nack** / no commit → the confirmed LSN is **not** advanced, so on
+//!   reconnect replication resumes from the last durably-acknowledged position —
+//!   at-least-once, no data loss across an in-flight restart.
+//!
+//! The confirmed LSN is cumulative (like Kafka offsets), so
+//! [`commit_requires_order`](MessageConsumer::commit_requires_order) is `true`.
+
+mod pgoutput;
+pub(crate) mod replication;
+mod state;
+
+use crate::canonical_message::{hashed_id, CanonicalMessage, IdHash};
+use crate::checkpoint::{
+    checkpoint_key, CheckpointStore, FileCheckpointStore, VersionedCheckpoint,
+};
+use crate::errors::ConsumerError;
+use crate::models::PostgresCdcConfig;
+use crate::traits::{BatchCommitFunc, MessageConsumer, MessageDisposition};
+use crate::ReceivedBatch;
+use anyhow::anyhow;
+use async_trait::async_trait;
+use futures::FutureExt;
+use pgwire_replication::{Lsn, ReplicationClient};
+use replication::ReplicationEvent;
+use std::any::Any;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use tracing::{debug, info, warn};
+
+use pgoutput::decoder::decode_message;
+use pgoutput::messages::{
+    Delete, Insert, Message, Relation, Truncate, TupleData, Update, UpdateOldKind,
+};
+use pgoutput::registry::RelationRegistry;
+use pgoutput::tuple_to_json_object;
+pub(crate) use pgoutput::values::text_to_json;
+
+tokio::task_local! {
+    static CDC_VALUES: ();
+}
+
+/// True while [`open_backfill_phase`] builds a consumer: its rows render values as the CDC
+/// stream does, so a column reads the same in the back fill and in the stream.
+pub(crate) fn cdc_values() -> bool {
+    CDC_VALUES.try_with(|_| ()).is_ok()
+}
+
+/// Opens one phase of the `sequence` that `capture_all`/`snapshot` expands to.
+pub(crate) fn open_backfill_phase<'a>(
+    route_name: &'a str,
+    endpoint: &'a crate::models::Endpoint,
+) -> crate::endpoints::structural::sequence::PhaseFuture<'a> {
+    Box::pin(CDC_VALUES.scope(
+        (),
+        crate::endpoints::create_consumer_from_route(route_name, endpoint),
+    ))
+}
+use state::{format_lsn, parse_lsn};
+
+/// A logical-replication CDC consumer for a single Postgres publication + slot.
+pub struct PostgresCdcConsumer {
+    client: ReplicationClient,
+    registry: RelationRegistry,
+    /// Rows decoded within the currently-open transaction (flushed to `ready`
+    /// on COMMIT, once their durable resume position — the commit `end_lsn` — is known).
+    tx_buffer: Vec<CanonicalMessage>,
+    /// Committed rows awaiting delivery, each with the LSN its ack confirms: the commit
+    /// `end_lsn` on the last row of a transaction, 0 on the rows before it.
+    ready: VecDeque<(CanonicalMessage, u64)>,
+    /// Highest confirm LSN handed out in a batch so far.
+    handed_out: u64,
+    in_transaction: bool,
+    /// Set by the first nack; see [`NackLatch`].
+    nacked: NackLatch,
+    /// Highest durably-acknowledged LSN; fed back to the server as the slot's confirmed position.
+    confirmed: Arc<AtomicU64>,
+    checkpoint: Option<Arc<VersionedCheckpoint>>,
+    /// Connection URL used on teardown to advance the slot durably (see `Drop`).
+    url: String,
+    /// Slot name used on teardown to advance the slot durably (see `Drop`).
+    slot_name: String,
+    /// TLS config used on teardown to reopen the control-plane connection (see `Drop`).
+    tls: crate::models::TlsConfig,
+    ended: bool,
+    /// A failure hit while topping up a batch, reported after that batch is delivered.
+    deferred_error: Option<ConsumerError>,
+    /// `temporary_slot`: drop the slot on teardown instead of advancing it.
+    drop_slot_on_stop: bool,
+    /// Set once teardown has run, so the `Drop` fallback never repeats the hook's work.
+    teardown_done: AtomicBool,
+    /// Drain mode: only then does an idle replication read time out into an empty batch.
+    exit_on_empty: bool,
+    /// Resolved once at construction from endpoint config and the legacy fallback.
+    source_metadata: bool,
+    id_hash: IdHash,
+    split_key_change: bool,
+}
+
+impl PostgresCdcConsumer {
+    pub async fn new(config: &PostgresCdcConfig) -> anyhow::Result<Self> {
+        Self::new_with_source_metadata(config, false).await
+    }
+
+    pub async fn new_with_source_metadata(
+        config: &PostgresCdcConfig,
+        source_metadata: bool,
+    ) -> anyhow::Result<Self> {
+        let source_metadata = crate::canonical_message::source_metadata_enabled_for_endpoint(
+            source_metadata || config.source_metadata,
+        );
+        if config.url.trim().is_empty() {
+            return Err(anyhow!("postgres_cdc: `url` is required"));
+        }
+        // `publication` and `slot_name` flow into replication commands
+        // (START_REPLICATION ... SLOT ... PUBLICATION ...). The slot-lifecycle
+        // SQL binds them as parameters, but restrict them to a safe identifier
+        // charset as defence-in-depth against injection into the replication path.
+        if !is_valid_pg_ident(&config.publication) {
+            return Err(anyhow!(
+                "postgres_cdc: `publication` must be a non-empty [A-Za-z0-9_] identifier"
+            ));
+        }
+        if !is_valid_pg_ident(&config.slot_name) {
+            return Err(anyhow!(
+                "postgres_cdc: `slot_name` must be a non-empty [A-Za-z0-9_] identifier"
+            ));
+        }
+
+        if config.create_publication {
+            replication::ensure_publication(
+                &config.url,
+                &config.publication,
+                &config.publication_tables,
+                &config.tls,
+            )
+            .await?;
+        }
+        match replication::tables_without_replica_identity(
+            &config.url,
+            &config.publication,
+            &config.tls,
+        )
+        .await
+        {
+            Ok(tables) if !tables.is_empty() => warn!(
+                publication = %config.publication,
+                tables = %tables.join(", "),
+                "postgres_cdc: published tables have no primary key or replica identity, so \
+                 Postgres rejects UPDATE/DELETE on them; add a primary key or run \
+                 `ALTER TABLE <table> REPLICA IDENTITY FULL`"
+            ),
+            Ok(_) => {}
+            Err(e) => debug!(error = %e, "postgres_cdc: skipped the replica identity check"),
+        }
+
+        replication::ensure_slot(
+            &config.url,
+            &config.slot_name,
+            config.create_slot,
+            config.temporary_slot,
+            &config.tls,
+        )
+        .await?;
+
+        // Optional secondary checkpoint (the slot's confirmed_flush_lsn is the
+        // authoritative durable position; this file mirror seeds a slot-advance
+        // on reconnect and aids observability).
+        let checkpoint: Option<Arc<VersionedCheckpoint>> = match &config.checkpoint_store {
+            Some(spec) => {
+                let cid = config
+                    .cursor_id
+                    .clone()
+                    .unwrap_or_else(|| config.slot_name.clone());
+                // Only a local file path or a `file://` URL is a valid checkpoint
+                // store; reject any other URL scheme rather than treating it as a
+                // literal path.
+                let path = if let Some(rest) = spec.strip_prefix("file://") {
+                    rest.to_string()
+                } else if let Some((scheme, _)) = spec.split_once("://") {
+                    return Err(anyhow!(
+                        "postgres_cdc: checkpoint_store scheme `{scheme}://` is not supported; \
+                         use a local file path or a file:// URL"
+                    ));
+                } else {
+                    spec.to_string()
+                };
+                Some(Arc::new(VersionedCheckpoint::new(
+                    Arc::new(FileCheckpointStore::new(
+                        path,
+                        checkpoint_key("postgres_cdc", &cid),
+                    )),
+                    format!("postgres_cdc:{}", config.slot_name),
+                )))
+            }
+            None => None,
+        };
+
+        let start_lsn: Option<u64> = match &checkpoint {
+            Some(cp) => match cp.entry().await? {
+                Some(entry) if entry.source.as_deref().is_some_and(|s| s != cp.source()) => {
+                    warn!(
+                        stored = ?entry.source,
+                        source = %cp.source(),
+                        "postgres_cdc: ignoring checkpoint written by another source; the slot position applies"
+                    );
+                    None
+                }
+                Some(entry) => match parse_lsn(&entry.value) {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        warn!(value = %entry.value, error = %e, "postgres_cdc: ignoring unparseable checkpoint LSN");
+                        None
+                    }
+                },
+                None => None,
+            },
+            None => None,
+        };
+
+        if let Some(lsn) = start_lsn {
+            replication::advance_slot(&config.url, &config.slot_name, lsn, &config.tls).await?;
+        }
+
+        let client = replication::start_replication(config, start_lsn).await?;
+        info!(
+            slot = %config.slot_name,
+            publication = %config.publication,
+            resume_lsn = ?start_lsn.map(format_lsn),
+            "postgres_cdc: replication stream started"
+        );
+
+        Ok(Self {
+            client,
+            registry: RelationRegistry::new(),
+            tx_buffer: Vec::new(),
+            ready: VecDeque::new(),
+            handed_out: 0,
+            in_transaction: false,
+            nacked: NackLatch::default(),
+            confirmed: Arc::new(AtomicU64::new(start_lsn.unwrap_or(0))),
+            checkpoint,
+            url: config.url.clone(),
+            slot_name: config.slot_name.clone(),
+            tls: config.tls.clone(),
+            ended: false,
+            deferred_error: None,
+            drop_slot_on_stop: config.temporary_slot,
+            teardown_done: AtomicBool::new(false),
+            exit_on_empty: false,
+            source_metadata,
+            id_hash: config.id_hash,
+            split_key_change: config.split_key_change,
+        })
+    }
+
+    /// Release the slot: stop the stream, then either drop the slot (ephemeral run) or
+    /// advance its `confirmed_flush_lsn` to the last acked position.
+    ///
+    /// Runs at most once. Both branches need a fresh control-plane connection —
+    /// `pg_replication_slot_advance` and `pg_drop_replication_slot` are ordinary SQL, not
+    /// replication commands — which is why this belongs in `on_disconnect_hook` (awaited by
+    /// the route while the runtime is still healthy) rather than in `Drop`, where opening a
+    /// connection during runtime teardown fails with "task was cancelled".
+    async fn teardown(&self) {
+        if self.teardown_done.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let lsn = self.confirmed.load(Ordering::Acquire);
+        if lsn == 0 && !self.drop_slot_on_stop {
+            return;
+        }
+        // CopyDone; the worker exits and the server releases the slot shortly after. Both
+        // helpers below poll `pg_replication_slots.active` until then.
+        self.client.stop();
+        if self.drop_slot_on_stop {
+            // Ephemeral run: the slot is discarded, so its confirmed_flush_lsn is
+            // irrelevant — dropping it releases the retained WAL outright.
+            if let Err(e) = replication::drop_slot(&self.url, &self.slot_name, &self.tls).await {
+                warn!(error = %e, "postgres_cdc: dropping ephemeral slot on shutdown failed");
+            }
+        } else if let Err(e) =
+            replication::advance_slot_when_inactive(&self.url, &self.slot_name, lsn, &self.tls)
+                .await
+        {
+            warn!(error = %e, "postgres_cdc: durable slot advance on shutdown failed");
+        }
+    }
+
+    /// Push the current confirmed LSN to the server as the slot's applied position.
+    fn feedback(&self) {
+        let lsn = self.confirmed.load(Ordering::Acquire);
+        self.client.update_applied_lsn(Lsn::from_u64(lsn));
+    }
+
+    /// Confirm a position that carried no rows, once nothing is buffered or waiting for an
+    /// ack. Otherwise writes to tables outside the publication would pin WAL on the server
+    /// for as long as the published tables stay quiet.
+    fn confirm_when_idle(&self, lsn: u64) {
+        let idle = !self.in_transaction
+            && self.tx_buffer.is_empty()
+            && self.ready.is_empty()
+            && !self.nacked.is_tripped()
+            && self.confirmed.load(Ordering::Acquire) >= self.handed_out;
+        if idle {
+            self.confirmed.fetch_max(lsn, Ordering::AcqRel);
+            // An idle stream never returns from `receive_batch`, whose start is the other report.
+            self.feedback();
+        }
+    }
+
+    /// Handle one replication event, staging rows and flushing committed
+    /// transactions into the ready queue.
+    fn handle_event(&mut self, ev: ReplicationEvent) -> anyhow::Result<()> {
+        match ev {
+            ReplicationEvent::Begin { .. } => {
+                self.tx_buffer.clear();
+                self.in_transaction = true;
+            }
+            ReplicationEvent::Commit { end_lsn, .. } => {
+                let lsn = end_lsn.as_u64();
+                let lsn_str = format_lsn(lsn);
+                let rows = self.tx_buffer.len();
+                self.in_transaction = false;
+                if rows == 0 {
+                    self.confirm_when_idle(lsn);
+                }
+                for (ordinal, mut msg) in self.tx_buffer.drain(..).enumerate() {
+                    let operation = msg.get_metadata("postgres.operation").unwrap_or("");
+                    // A truncate names no row, so it has no key but still gets a stable id.
+                    let key = msg
+                        .get_metadata("postgres.key")
+                        .or((operation == "truncate").then_some(""));
+                    let dedup_id = key.map(|key| {
+                        let schema = msg.get_metadata("postgres.schema").unwrap_or("");
+                        let table = msg.get_metadata("postgres.table").unwrap_or("");
+                        // Include op + in-tx ordinal so multiple changes to the same key
+                        // in one commit get distinct (still deterministic) ids.
+                        cdc_dedup_id(self.id_hash, schema, table, key, lsn, operation, ordinal)
+                    });
+                    if let Some(id) = dedup_id {
+                        msg.message_id = id;
+                    }
+                    msg.set_metadata("postgres.lsn", lsn_str.clone());
+                    if self.source_metadata {
+                        add_source_metadata(&mut msg, &self.slot_name, lsn, ordinal);
+                    }
+                    self.ready.push_back((msg, confirm_lsn(ordinal, rows, lsn)));
+                }
+            }
+            ReplicationEvent::XLogData { data, .. } => {
+                let msg = decode_message(&data)?;
+                self.stage_message(msg)?;
+            }
+            ReplicationEvent::KeepAlive { wal_end, .. } => {
+                // The library replies to keepalives itself; nothing to stage.
+                self.confirm_when_idle(wal_end.as_u64());
+            }
+            ReplicationEvent::Message { prefix, .. } => {
+                // Logical decoding messages (pg_logical_emit_message) carry no
+                // row-change data; skip them rather than terminating the stream.
+                debug!(%prefix, "postgres_cdc: ignoring logical decoding message");
+            }
+            other => {
+                // An unrecognized variant may carry change data — fail fast
+                // rather than silently drop it.
+                return Err(anyhow!(
+                    "postgres_cdc: unhandled replication event {other:?}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn stage_message(&mut self, msg: Message) -> anyhow::Result<()> {
+        match msg {
+            Message::Relation(r) => self.registry.insert(r),
+            Message::Insert(i) => {
+                let m = stage_insert(self.registry.get(i.relation_oid)?, &i)?;
+                self.tx_buffer.push(m);
+            }
+            Message::Update(u) => {
+                let rel = self.registry.get(u.relation_oid)?;
+                if self.split_key_change {
+                    self.tx_buffer.extend(stage_old_key_delete(rel, &u)?);
+                }
+                let m = stage_update(rel, &u)?;
+                self.tx_buffer.push(m);
+            }
+            Message::Delete(d) => {
+                let m = stage_delete(self.registry.get(d.relation_oid)?, &d)?;
+                self.tx_buffer.push(m);
+            }
+            Message::Truncate(t) => {
+                let mut staged = Vec::new();
+                for oid in &t.relation_oids {
+                    match self.registry.get(*oid) {
+                        Ok(rel) => staged.push(stage_truncate(rel, &t)),
+                        Err(e) => {
+                            debug!(oid, error = %e, "postgres_cdc: ignoring truncate for unknown relation")
+                        }
+                    }
+                }
+                self.tx_buffer.extend(staged);
+            }
+            // Begin/Commit arrive as protocol-level ReplicationEvent variants,
+            // handled in handle_event; Origin/Type are accepted and ignored.
+            Message::Begin(_) | Message::Commit(_) | Message::Origin | Message::Type => {}
+        }
+        Ok(())
+    }
+}
+
+/// The confirmed LSN is cumulative: confirming a later change also confirms every change
+/// before it, a nacked one included. So after a nack this consumer stops confirming and its
+/// next read fails, which makes the route reconnect and replay from the confirmed position.
+#[derive(Clone, Default)]
+struct NackLatch(Arc<NackLatchInner>);
+
+#[derive(Default)]
+struct NackLatchInner {
+    tripped: AtomicBool,
+    /// Wakes a read blocked on a quiet stream, so the replay doesn't wait for new changes.
+    notify: tokio::sync::Notify,
+}
+
+impl NackLatch {
+    fn trip(&self) {
+        self.0.tripped.store(true, Ordering::Release);
+        self.0.notify.notify_waiters();
+    }
+
+    fn is_tripped(&self) -> bool {
+        self.0.tripped.load(Ordering::Acquire)
+    }
+
+    fn error() -> ConsumerError {
+        ConsumerError::Connection(anyhow!(
+            "postgres_cdc: a change was nacked; reconnecting to replay from the confirmed position"
+        ))
+    }
+
+    async fn tripped(&self) {
+        let notified = self.0.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if !self.is_tripped() {
+            notified.await;
+        }
+    }
+}
+
+/// The LSN an ack of row `ordinal` confirms. Rows of a transaction share its `end_lsn`,
+/// so only the last one may confirm it; a batch can end in the middle of a transaction.
+fn confirm_lsn(ordinal: usize, rows: usize, end_lsn: u64) -> u64 {
+    if ordinal + 1 == rows {
+        end_lsn
+    } else {
+        0
+    }
+}
+
+/// The LSN a batch's dispositions confirm, and whether a row was nacked. Nothing after
+/// the first row that was not acked counts.
+fn confirmed_by(dispositions: &[MessageDisposition], lsns: &[u64]) -> (u64, bool) {
+    let mut target = 0;
+    for (i, lsn) in lsns.iter().enumerate() {
+        match dispositions.get(i) {
+            Some(MessageDisposition::Ack | MessageDisposition::Reply(_)) => {
+                if *lsn > 0 {
+                    target = *lsn;
+                }
+            }
+            Some(MessageDisposition::Nack) => return (target, true),
+            None => return (target, false),
+        }
+    }
+    (target, false)
+}
+
+/// Build a change-event message: JSON body + `postgres.operation`/schema/table metadata.
+/// When the relation has replica-identity key columns, their values are recorded as
+/// `postgres.key`; the deterministic dedup `message_id` is stamped later at commit (once
+/// the LSN is known) in [`PostgresCdcConsumer::handle_event`].
+fn cdc_message(rel: &Relation, operation: &str, body: serde_json::Value) -> CanonicalMessage {
+    let key = body
+        .as_object()
+        .and_then(|obj| replica_key_string(rel, obj));
+    let payload = serde_json::to_vec(&body).unwrap_or_default();
+    let mut msg = CanonicalMessage::new_bytes(payload.into(), None);
+    msg.set_metadata("postgres.operation", operation.to_string());
+    msg.set_metadata("postgres.schema", rel.namespace.clone());
+    msg.set_metadata("postgres.table", rel.name.clone());
+    if let Some(key) = key {
+        msg.set_metadata("postgres.key", key);
+    }
+    msg
+}
+
+/// The relation's replica-identity key column values (bit 0 of the column flags) from a
+/// decoded row, serialized as a typed JSON array so distinct value combinations can never
+/// collide (unlike a delimiter join). `None` when the relation exposes no key (no PK /
+/// replica identity NOTHING), in which case no deterministic id can be derived.
+fn replica_key_string(
+    rel: &Relation,
+    body: &serde_json::Map<String, serde_json::Value>,
+) -> Option<String> {
+    let mut parts: Vec<serde_json::Value> = Vec::new();
+    for col in &rel.columns {
+        if col.flags & 1 == 1 {
+            parts.push(
+                body.get(&col.name)
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            );
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Array(parts).to_string())
+    }
+}
+
+fn recv_error(e: impl std::fmt::Display) -> ConsumerError {
+    let msg = format!("postgres_cdc: recv failed: {e}");
+    // A vanished slot never comes back on its own; don't reconnect-loop.
+    if replication::is_missing_slot_error(&msg) {
+        ConsumerError::Permanent(anyhow!(msg))
+    } else {
+        ConsumerError::Connection(anyhow!(msg))
+    }
+}
+
+/// Deterministic dedup id for a change event: [`hashed_id`] over
+/// `schema.table\0key\0operation\0lsn\0ordinal`. A replayed change (same key, op and
+/// in-tx position at the same commit LSN) hashes identically so the dedup middleware /
+/// sink can drop it; distinct changes — including several to one key in one transaction —
+/// differ by op, LSN, or ordinal.
+fn cdc_dedup_id(
+    hash: IdHash,
+    schema: &str,
+    table: &str,
+    key: &str,
+    lsn: u64,
+    operation: &str,
+    ordinal: usize,
+) -> u128 {
+    hashed_id(
+        hash,
+        &[
+            schema.as_bytes(),
+            b".",
+            table.as_bytes(),
+            b"\0",
+            key.as_bytes(),
+            b"\0",
+            operation.as_bytes(),
+            b"\0",
+            &lsn.to_be_bytes(),
+            b"\0",
+            &(ordinal as u64).to_be_bytes(),
+        ],
+    )
+}
+
+fn add_source_metadata(message: &mut CanonicalMessage, slot: &str, lsn: u64, ordinal: usize) {
+    message.set_metadata("mqb.src.postgres_slot", slot);
+    message.set_metadata("mqb.src.postgres_lsn", lsn.to_string());
+    message.set_metadata("mqb.src.postgres_ordinal", ordinal.to_string());
+}
+
+/// A safe Postgres identifier for a publication / replication slot: non-empty
+/// and `[A-Za-z0-9_]` only. Slot names are additionally lowercased by Postgres,
+/// but rejecting anything outside this set is enough to keep the value from
+/// escaping into the replication command it is interpolated into.
+pub(crate) fn is_valid_pg_ident(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// The row as a JSON object. A row that has not one cell per column would be paired
+/// with the wrong names, so it is refused; the reconnect brings a fresh relation.
+fn row_object(
+    rel: &Relation,
+    tuple: &TupleData,
+) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
+    if tuple.cells.len() != rel.columns.len() {
+        return Err(anyhow!(
+            "postgres_cdc: {}.{} sent {} cells for {} columns",
+            rel.namespace,
+            rel.name,
+            tuple.cells.len(),
+            rel.columns.len()
+        ));
+    }
+    Ok(tuple_to_json_object(rel, tuple))
+}
+
+fn stage_insert(rel: &Relation, i: &Insert) -> anyhow::Result<CanonicalMessage> {
+    let body = serde_json::Value::Object(row_object(rel, &i.new)?);
+    Ok(cdc_message(rel, "insert", body))
+}
+
+fn stage_update(rel: &Relation, u: &Update) -> anyhow::Result<CanonicalMessage> {
+    let body = serde_json::Value::Object(row_object(rel, &u.new)?);
+    let mut msg = cdc_message(rel, "update", body);
+    // Postgres sends the old key only when the update changed it.
+    if let (UpdateOldKind::Key, Some(old)) = (u.old_kind, &u.old) {
+        if let Some(old_key) = replica_key_string(rel, &row_object(rel, old)?) {
+            msg.set_metadata("postgres.old_key", old_key);
+        }
+    }
+    Ok(msg)
+}
+
+/// The `delete` of the row an update moved to another key; `None` when the key is unchanged.
+fn stage_old_key_delete(rel: &Relation, u: &Update) -> anyhow::Result<Option<CanonicalMessage>> {
+    let (UpdateOldKind::Key, Some(old)) = (u.old_kind, &u.old) else {
+        return Ok(None);
+    };
+    let body = serde_json::Value::Object(row_object(rel, old)?);
+    Ok(Some(cdc_message(rel, "delete", body)))
+}
+
+fn stage_delete(rel: &Relation, d: &Delete) -> anyhow::Result<CanonicalMessage> {
+    // For a delete the only data available is the old tuple (key columns, or the
+    // full row under REPLICA IDENTITY FULL).
+    let body = serde_json::Value::Object(row_object(rel, &d.old)?);
+    Ok(cdc_message(rel, "delete", body))
+}
+
+fn stage_truncate(rel: &Relation, _t: &Truncate) -> CanonicalMessage {
+    let mut msg = cdc_message(rel, "truncate", serde_json::json!({}));
+    msg.remove_metadata("postgres.key");
+    msg
+}
+
+#[async_trait]
+impl MessageConsumer for PostgresCdcConsumer {
+    fn set_exit_on_empty(&mut self, exit_on_empty: bool) {
+        self.exit_on_empty = exit_on_empty;
+    }
+
+    /// Release the slot while the runtime is still healthy — see `teardown`.
+    fn on_disconnect_hook(&self) -> Option<crate::traits::BoxFuture<'_, anyhow::Result<()>>> {
+        Some(Box::pin(async move {
+            self.teardown().await;
+            Ok(())
+        }))
+    }
+
+    async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
+        if max_messages == 0 {
+            return Ok(ReceivedBatch {
+                messages: Vec::new(),
+                commit: Box::new(|_| Box::pin(async { Ok(()) })),
+            });
+        }
+
+        if self.nacked.is_tripped() {
+            return Err(NackLatch::error());
+        }
+        // Report the latest durably-acknowledged position before blocking.
+        self.feedback();
+
+        if self.ready.is_empty() {
+            if let Some(e) = self.deferred_error.take() {
+                return Err(e);
+            }
+        }
+
+        // Pump the replication stream until a committed transaction is ready.
+        while self.ready.is_empty() {
+            if self.ended {
+                return Err(ConsumerError::EndOfStream);
+            }
+            // Drain mode: a brief idle timeout yields an empty batch (no-op commit, so the
+            // slot is not advanced past unconsumed changes) and lets --drain fire.
+            // `recv()` is cancel-safe — it awaits a channel; wire framing runs in a
+            // background worker with its own resumable reader — so the timeout drop here
+            // loses nothing.
+            let latch = self.nacked.clone();
+            let ev = tokio::select! {
+                _ = latch.tripped() => return Err(NackLatch::error()),
+                ev = crate::traits::drain_gated(self.exit_on_empty, self.client.recv()) => ev,
+            };
+            let Some(ev) = ev else {
+                return Ok(ReceivedBatch::empty());
+            };
+            match ev {
+                Ok(None) | Ok(Some(ReplicationEvent::StoppedAt { .. })) => {
+                    self.ended = true;
+                    return Err(ConsumerError::EndOfStream);
+                }
+                Ok(Some(ev)) => {
+                    self.handle_event(ev).map_err(ConsumerError::Connection)?;
+                }
+                Err(e) => return Err(recv_error(e)),
+            }
+        }
+
+        // Top the batch up from events that already arrived, without waiting for more:
+        // a backlog of single-row transactions otherwise leaves as one-row batches.
+        // `unconstrained`: tokio's coop budget would report the channel empty after
+        // ~128 events, capping batches at ~40 transactions. Bounded by event count too:
+        // rows of a still-open transaction don't grow `ready`, so it alone may never fill.
+        let mut event_budget = max_messages.saturating_mul(4).max(64);
+        while self.deferred_error.is_none() && self.ready.len() < max_messages && event_budget > 0 {
+            event_budget -= 1;
+            match tokio::task::unconstrained(self.client.recv()).now_or_never() {
+                None => break,
+                Some(Ok(None)) | Some(Ok(Some(ReplicationEvent::StoppedAt { .. }))) => {
+                    self.ended = true;
+                    break;
+                }
+                Some(Ok(Some(ev))) => {
+                    if let Err(e) = self.handle_event(ev) {
+                        self.deferred_error = Some(ConsumerError::Connection(e));
+                        break;
+                    }
+                }
+                Some(Err(e)) => {
+                    self.deferred_error = Some(recv_error(e));
+                    break;
+                }
+            }
+        }
+
+        let n = self.ready.len().min(max_messages);
+        let mut messages = Vec::with_capacity(n);
+        let mut lsns = Vec::with_capacity(n);
+        for _ in 0..n {
+            let (msg, lsn) = self.ready.pop_front().expect("ready is non-empty");
+            self.handed_out = self.handed_out.max(lsn);
+            messages.push(msg);
+            lsns.push(lsn);
+        }
+
+        let confirmed = self.confirmed.clone();
+        let checkpoint = self.checkpoint.clone();
+        let nacked = self.nacked.clone();
+        let commit: BatchCommitFunc = Box::new(move |dispositions: Vec<MessageDisposition>| {
+            Box::pin(async move {
+                if nacked.is_tripped() {
+                    return Ok(());
+                }
+                let (target, refused) = confirmed_by(&dispositions, &lsns);
+                if refused {
+                    nacked.trip();
+                }
+                if target > 0 {
+                    confirmed.fetch_max(target, Ordering::AcqRel);
+                    if let Some(cp) = &checkpoint {
+                        if let Err(e) = cp.save(&format_lsn(target)).await {
+                            warn!(error = %e, "postgres_cdc: checkpoint save failed");
+                        }
+                    }
+                }
+                Ok(())
+            })
+        });
+
+        Ok(ReceivedBatch { messages, commit })
+    }
+
+    /// The confirmed LSN is cumulative — acking a later LSN implicitly confirms
+    /// everything before it — so commits must be applied in receive order.
+    fn commit_requires_order(&self) -> bool {
+        true
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Durably persist the last acked position on teardown.
+///
+/// The replication library's in-band standby-status feedback is asynchronous —
+/// the worker sends it on its `status_interval` tick and, critically, does *not*
+/// flush a final update on `stop()`/`shutdown()`. A consumer torn down right
+/// after an ack can therefore lose that ack's durability: the server's
+/// `confirmed_flush_lsn` never advances, and after a restart the slot replays
+/// changes that were already acknowledged.
+///
+/// To close that gap we stop the stream (so the server releases the slot) and
+/// advance the slot's `confirmed_flush_lsn` synchronously via SQL —
+/// `pg_replication_slot_advance` requires an *inactive* slot, which is why this
+/// cannot be done per-commit while the stream is live.
+///
+/// This needs `block_in_place`, so it only runs on a multi-thread runtime; on a
+/// current-thread runtime (or off-runtime) we fall back to the best-effort async
+/// feedback already sent during streaming.
+impl Drop for PostgresCdcConsumer {
+    /// Best-effort fallback for consumers dropped without a graceful stop (direct API use,
+    /// a panicking route). The route path runs `on_disconnect_hook` first, and `teardown`
+    /// is single-shot, so this is normally a no-op.
+    ///
+    /// It stays best-effort on purpose: opening the control-plane connection from here
+    /// fails once the runtime has started cancelling tasks, which is exactly why the real
+    /// teardown moved into the disconnect hook.
+    fn drop(&mut self) {
+        if self.teardown_done.load(Ordering::Acquire) {
+            return;
+        }
+        let lsn = self.confirmed.load(Ordering::Acquire);
+        // With no acked position and nothing to clean up there is no teardown work.
+        if lsn == 0 && !self.drop_slot_on_stop {
+            return;
+        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread {
+            return;
+        }
+        tokio::task::block_in_place(|| handle.block_on(self.teardown()));
+    }
+}
+
+#[cfg(test)]
+mod cdc_id_tests {
+    use super::*;
+    use pgoutput::messages::{ColumnDesc, ReplicaIdentity};
+
+    #[test]
+    fn only_the_last_row_of_a_transaction_confirms_its_lsn() {
+        let lsns: Vec<u64> = (0..3).map(|row| confirm_lsn(row, 3, 40)).collect();
+        assert_eq!(lsns, vec![0, 0, 40]);
+        // A batch that ends inside the transaction confirms nothing.
+        let acks = vec![MessageDisposition::Ack; 2];
+        assert_eq!(confirmed_by(&acks, &lsns[..2]), (0, false));
+        let acks = vec![MessageDisposition::Ack; 3];
+        assert_eq!(confirmed_by(&acks, &lsns), (40, false));
+    }
+
+    #[test]
+    fn a_nack_confirms_only_the_transactions_before_it() {
+        use MessageDisposition::{Ack, Nack};
+        // Two transactions of two rows each; the last row of the second is nacked.
+        let lsns = [0, 10, 0, 20];
+        assert_eq!(confirmed_by(&[Ack, Ack, Ack, Nack], &lsns), (10, true));
+        assert_eq!(confirmed_by(&[Ack, Nack, Ack, Ack], &lsns), (0, true));
+        // A missing disposition stops the advance without asking for a replay.
+        assert_eq!(confirmed_by(&[Ack, Ack], &lsns), (10, false));
+    }
+
+    fn rel_with_key() -> Relation {
+        Relation {
+            oid: 16384,
+            namespace: "public".into(),
+            name: "orders".into(),
+            replica_identity: ReplicaIdentity::Default,
+            columns: vec![
+                ColumnDesc {
+                    flags: 1,
+                    name: "id".into(),
+                    type_oid: 23,
+                    type_modifier: -1,
+                },
+                ColumnDesc {
+                    flags: 0,
+                    name: "body".into(),
+                    type_oid: 25,
+                    type_modifier: -1,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn replica_key_uses_only_key_columns() {
+        let rel = rel_with_key();
+        let body = serde_json::json!({ "id": 42, "body": "hi" });
+        let key = replica_key_string(&rel, body.as_object().unwrap());
+        assert_eq!(key.as_deref(), Some("[42]"));
+    }
+
+    #[test]
+    fn replica_key_none_without_key_columns() {
+        let mut rel = rel_with_key();
+        rel.columns[0].flags = 0;
+        let body = serde_json::json!({ "id": 42 });
+        assert!(replica_key_string(&rel, body.as_object().unwrap()).is_none());
+    }
+
+    #[test]
+    fn cdc_message_sets_postgres_key() {
+        let rel = rel_with_key();
+        let body = serde_json::json!({ "id": 7, "body": "x" });
+        let msg = cdc_message(&rel, "insert", body);
+        assert_eq!(msg.get_metadata("postgres.key"), Some("[7]"));
+    }
+
+    #[test]
+    fn dedup_id_is_stable_and_lsn_sensitive() {
+        // Same change (key + op + lsn + ordinal) → identical id (a replay deduplicates).
+        let a = cdc_dedup_id(IdHash::Fnv1a, "public", "orders", "42", 100, "insert", 0);
+        let b = cdc_dedup_id(IdHash::Fnv1a, "public", "orders", "42", 100, "insert", 0);
+        assert_eq!(a, b);
+        // Different lsn → different id (distinct updates are not collapsed).
+        assert_ne!(
+            a,
+            cdc_dedup_id(IdHash::Fnv1a, "public", "orders", "42", 101, "insert", 0)
+        );
+        // Different key → different id.
+        assert_ne!(
+            a,
+            cdc_dedup_id(IdHash::Fnv1a, "public", "orders", "43", 100, "insert", 0)
+        );
+        // Different operation on the same key/lsn → different id.
+        assert_ne!(
+            a,
+            cdc_dedup_id(IdHash::Fnv1a, "public", "orders", "42", 100, "update", 0)
+        );
+        // Different in-transaction ordinal → different id (same key twice in one commit).
+        assert_ne!(
+            a,
+            cdc_dedup_id(IdHash::Fnv1a, "public", "orders", "42", 100, "insert", 1)
+        );
+        // Pinned: fnv1a is what 0.4.15 produced; sha256 is the opt-in.
+        assert_eq!(a, 0x6e3f9e1daba2f7071c7118f5d9c51194);
+        assert_eq!(
+            cdc_dedup_id(IdHash::Sha256, "public", "orders", "42", 100, "insert", 0),
+            0x3423eaf7bbc7dfd6a251a14676a7e092
+        );
+    }
+
+    #[test]
+    fn source_metadata_identifies_each_change_in_a_commit() {
+        let mut message = CanonicalMessage::new(b"payload".to_vec(), None);
+        add_source_metadata(&mut message, "bridge_slot", 9_876_543_210, 1);
+
+        assert_eq!(
+            message.get_metadata("mqb.src.postgres_slot"),
+            Some("bridge_slot")
+        );
+        assert_eq!(
+            message.get_metadata("mqb.src.postgres_lsn"),
+            Some("9876543210")
+        );
+        assert_eq!(message.get_metadata("mqb.src.postgres_ordinal"), Some("1"));
+    }
+
+    fn row(id: &str, body: &str) -> pgoutput::messages::TupleData {
+        use pgoutput::messages::{TupleCell, TupleData};
+        TupleData {
+            cells: vec![TupleCell::Text(id.into()), TupleCell::Text(body.into())],
+        }
+    }
+
+    fn meta<'a>(message: &'a CanonicalMessage, key: &str) -> Option<&'a str> {
+        message.get_metadata(key)
+    }
+
+    #[test]
+    fn each_change_kind_is_staged_with_its_operation_table_and_row() {
+        use pgoutput::messages::{DeleteOldKind, UpdateOldKind};
+        let rel = rel_with_key();
+        let insert = Insert {
+            relation_oid: rel.oid,
+            new: row("1", "a"),
+        };
+        let update = Update {
+            relation_oid: rel.oid,
+            old_kind: UpdateOldKind::None,
+            old: None,
+            new: row("1", "b"),
+        };
+        let delete = Delete {
+            relation_oid: rel.oid,
+            old_kind: DeleteOldKind::Key,
+            old: row("1", "b"),
+        };
+        let truncate = Truncate {
+            relation_oids: vec![rel.oid],
+            cascade: false,
+            restart_identity: false,
+        };
+
+        let staged = [
+            ("insert", stage_insert(&rel, &insert).unwrap(), "a"),
+            ("update", stage_update(&rel, &update).unwrap(), "b"),
+            ("delete", stage_delete(&rel, &delete).unwrap(), "b"),
+        ];
+        for (operation, message, body) in staged {
+            assert_eq!(meta(&message, "postgres.operation"), Some(operation));
+            assert_eq!(meta(&message, "postgres.schema"), Some("public"));
+            assert_eq!(meta(&message, "postgres.table"), Some("orders"));
+            assert_eq!(meta(&message, "postgres.key"), Some("[1]"));
+            let payload: serde_json::Value = serde_json::from_slice(&message.payload).unwrap();
+            assert_eq!(payload, serde_json::json!({"id": 1, "body": body}));
+        }
+
+        let truncated = stage_truncate(&rel, &truncate);
+        assert_eq!(meta(&truncated, "postgres.operation"), Some("truncate"));
+        assert_eq!(&truncated.payload[..], b"{}");
+        assert_eq!(meta(&truncated, "postgres.key"), None);
+    }
+
+    #[test]
+    fn an_update_that_changes_the_key_names_the_old_key() {
+        use pgoutput::messages::{TupleCell, TupleData, UpdateOldKind};
+        let rel = rel_with_key();
+        let update = Update {
+            relation_oid: rel.oid,
+            old_kind: UpdateOldKind::Key,
+            old: Some(TupleData {
+                cells: vec![TupleCell::Text("1".into()), TupleCell::Null],
+            }),
+            new: row("2", "b"),
+        };
+        let message = stage_update(&rel, &update).unwrap();
+        assert_eq!(meta(&message, "postgres.key"), Some("[2]"));
+        assert_eq!(meta(&message, "postgres.old_key"), Some("[1]"));
+    }
+
+    #[test]
+    fn a_key_change_can_be_split_into_a_delete_of_the_old_key() {
+        use pgoutput::messages::{TupleCell, TupleData, UpdateOldKind};
+        let rel = rel_with_key();
+        let moved = Update {
+            relation_oid: rel.oid,
+            old_kind: UpdateOldKind::Key,
+            old: Some(TupleData {
+                cells: vec![TupleCell::Text("1".into()), TupleCell::Null],
+            }),
+            new: row("2", "b"),
+        };
+        let delete = stage_old_key_delete(&rel, &moved).unwrap().unwrap();
+        assert_eq!(meta(&delete, "postgres.operation"), Some("delete"));
+        assert_eq!(meta(&delete, "postgres.key"), Some("[1]"));
+        let payload: serde_json::Value = serde_json::from_slice(&delete.payload).unwrap();
+        assert_eq!(payload, serde_json::json!({"id": 1, "body": null}));
+
+        let in_place = Update {
+            relation_oid: rel.oid,
+            old_kind: UpdateOldKind::None,
+            old: None,
+            new: row("2", "c"),
+        };
+        assert!(stage_old_key_delete(&rel, &in_place).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_row_that_does_not_match_its_relation_is_refused() {
+        use pgoutput::messages::{TupleCell, TupleData};
+        let rel = rel_with_key();
+        let short = Insert {
+            relation_oid: rel.oid,
+            new: TupleData {
+                cells: vec![TupleCell::Text("1".into())],
+            },
+        };
+        let error = stage_insert(&rel, &short).unwrap_err();
+        assert!(
+            error.to_string().contains("1 cells for 2 columns"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_vanished_slot_is_permanent_and_other_receive_failures_reconnect() {
+        let gone = recv_error("replication slot \"s\" does not exist");
+        assert!(matches!(gone, ConsumerError::Permanent(_)), "{gone}");
+        let coded = recv_error("server error: gone (SQLSTATE 42704)");
+        assert!(matches!(coded, ConsumerError::Permanent(_)), "{coded}");
+        let reset = recv_error("connection reset by peer");
+        assert!(matches!(reset, ConsumerError::Connection(_)), "{reset}");
+        assert!(reset.to_string().contains("recv failed: connection reset"));
+    }
+
+    #[tokio::test]
+    async fn a_config_that_cannot_name_a_slot_is_refused_before_connecting() {
+        let valid = PostgresCdcConfig::new("postgres://localhost:1/db", "pub1");
+        let cases = [
+            (PostgresCdcConfig::new("  ", "pub1"), "`url` is required"),
+            (
+                PostgresCdcConfig::new("postgres://localhost:1/db", "pub; DROP"),
+                "`publication` must be",
+            ),
+            (
+                PostgresCdcConfig::new("postgres://localhost:1/db", ""),
+                "`publication` must be",
+            ),
+            (valid.clone().with_slot("my-slot"), "`slot_name` must be"),
+            (valid.with_slot(""), "`slot_name` must be"),
+        ];
+        for (config, expected) in cases {
+            let error = PostgresCdcConsumer::new(&config).await.err().unwrap();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn identifiers_are_limited_to_letters_digits_and_underscores() {
+        for valid in ["mqb_slot", "Pub1", "_", "9"] {
+            assert!(is_valid_pg_ident(valid), "{valid}");
+        }
+        for invalid in ["", "a b", "a-b", "a.b", "a\"b", "ä"] {
+            assert!(!is_valid_pg_ident(invalid), "{invalid}");
+        }
+    }
+}

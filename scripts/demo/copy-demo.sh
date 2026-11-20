@@ -160,8 +160,8 @@ shoot() {
   "$MQB" --version
 
   local src1="'file://orders.csv?format=csv'"
-  local dst1="'s3://lake/orders?format=payload&extension=jsonl.zst&compression=zstd'"
-  local opt1="--drain --batch-size 32768"
+  local dst1="'s3://lake/orders?format=parquet&compression=zstd'"
+  local opt1="--drain --batch-size 131072"
   local src2="'postgres://analytics:demo@127.0.0.1:5433/shop?table=orders&cursor_column=id'"
   local dst2="'nats://127.0.0.1:4222?subject=orders&no_jetstream=true'"
   local opt2="--drain --resume --batch-size 32768 --filter 'number(amount) > 50'"

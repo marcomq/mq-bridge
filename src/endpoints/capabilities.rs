@@ -296,7 +296,7 @@ const CAPABILITIES: &[EndpointCapabilities] = &[
         replies: With("lookup_query"),
         input_note: "A queue table commits in any order; a `cursor_column` or `publication` source in order.",
         output_note: "The reply is the first row; `sqlx.found` says whether there was one.",
-        security_note: "TLS can also be set in the URL (`sslmode=`, `ssl-mode=`). On MySQL an `ssl-mode` in the URL wins over the `tls` block.",
+        security_note: "TLS can also be set in the URL (`sslmode=`, `ssl-mode=`). On MySQL an `ssl-mode` in the URL wins over the `tls` block only when it enforces TLS (`REQUIRED` or stricter).",
         ..row("sqlx", TlsBlock)
     },
     EndpointCapabilities {

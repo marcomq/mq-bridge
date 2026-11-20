@@ -18,7 +18,7 @@ use crate::{
 };
 use mqi::attribute::{InqResItem, SetItems, MQIA_CURRENT_Q_DEPTH, MQIA_MAX_Q_DEPTH};
 use mqi::{
-    connection::{Credentials, MqServer, ThreadNone, Tls},
+    connection::{AsConnection, Credentials, MqServer, ThreadNone, Tls},
     constants, get, mqstr, open,
     result::ResultCompErrExt,
     types::{ApplName, CipherSpec, KeyRepo, MessageId, QueueManagerName, QueueName, FORMAT_NONE},
@@ -565,6 +565,205 @@ impl Drop for Unsettled {
     }
 }
 
+/// Opens the topic subscription, or the queue, the consumer reads from.
+fn open_source<C: AsConnection + Clone>(
+    conn: C,
+    config: &IbmMqConfig,
+) -> anyhow::Result<(Option<Subscription<C>>, Object<C>)> {
+    if let Some(topic) = &config.topic {
+        let topic_str = MqStr::<1024>::try_from(topic.as_str()).context("Invalid topic string")?;
+        // Ephemeral managed subscription: no MQSO_RESUME, which would
+        // require a subscription name (MQRC_SUB_NAME_ERROR otherwise).
+        let sub_opts = (
+            constants::MQSO_CREATE | constants::MQSO_MANAGED | constants::MQSO_NON_DURABLE,
+            open::ObjectString(&topic_str),
+        );
+        let (sub, obj) = Subscription::subscribe_managed(conn, sub_opts)
+            .map_err(|e| anyhow::anyhow!("MQ subscribe failed: {}", e))?
+            .discard_warning();
+        return Ok((Some(sub), obj));
+    }
+    let q_name_str = config
+        .queue
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("Queue name is required for IBM MQ consumer"))?;
+    let q_name = MqStr::<48>::try_from(q_name_str).context("Invalid queue name")?;
+    let mut open_options = constants::MQOO_INPUT_AS_Q_DEF | constants::MQOO_FAIL_IF_QUIESCING;
+    if !config.disable_status_inq {
+        open_options |= constants::MQOO_INQUIRE;
+    }
+    let obj = Object::open(conn, &(QueueName(q_name), open_options))
+        .map_err(|e| anyhow::anyhow!("MQ open failed: {}", e))?
+        .discard_warning();
+    Ok((None, obj))
+}
+
+/// Gets up to `max_messages` under syncpoint; an error ends the batch and is returned with it.
+fn receive_messages<C: AsConnection>(
+    obj: &Object<C>,
+    config: &IbmMqConfig,
+    max_messages: usize,
+) -> (Vec<CanonicalMessage>, Option<ConsumerError>) {
+    let mut messages = Vec::with_capacity(max_messages);
+    let mut buffer = vec![0u8; config.max_message_size];
+    let gmo = (
+        constants::MQGMO_WAIT
+            | constants::MQGMO_SYNCPOINT
+            | constants::MQGMO_FAIL_IF_QUIESCING
+            // Strip pub/sub RFH2 so the clean body is
+            // delivered (otherwise topic gets yield empty data).
+            | constants::MQGMO_NO_PROPERTIES,
+        get::GetWait::Wait(config.wait_timeout_ms),
+    );
+    for _ in 0..max_messages {
+        let res: Result<Option<(_, MessageId)>, _> = match obj.get_data_with(&gmo, &mut buffer) {
+            // Still on the queue: its cut-off start would be delivered forever.
+            Ok(got)
+                if matches!(
+                    got.warning(),
+                    Some((constants::MQRC_TRUNCATED_MSG_FAILED, _))
+                ) =>
+            {
+                let error = ConsumerError::Connection(anyhow::anyhow!(
+                    "IBM MQ message is larger than max_message_size ({} bytes); raise max_message_size",
+                    config.max_message_size
+                ));
+                return (messages, Some(error));
+            }
+            other => other.discard_warning(),
+        };
+        match res {
+            Ok(Some((data, msg_id))) => {
+                let mut canonical =
+                    CanonicalMessage::new(data.to_vec(), message_id_from_msg_id(&msg_id.0));
+                // Source cursor: the queue this was read from.
+                // Opt-in via MQB_SOURCE_METADATA; off by default.
+                if crate::canonical_message::source_metadata_enabled() {
+                    if let Some(queue) = config.queue.as_deref() {
+                        canonical.set_metadata("mqb.src.ibmmq_queue", queue.to_string());
+                    }
+                }
+                messages.push(canonical);
+                // zeroing buffer to avoid leaking sensitive data
+                let buffer_len = data.len();
+                buffer[..buffer_len].fill(0);
+            }
+            Ok(None) => {}
+            Err(e) if e.0 == constants::MQCC_FAILED && e.2 == constants::MQRC_NO_MSG_AVAILABLE => {
+                break;
+            }
+            Err(e) => {
+                let error = ConsumerError::Connection(anyhow::anyhow!("MQ get failed: {}", e));
+                return (messages, Some(error));
+            }
+        }
+    }
+    (messages, None)
+}
+
+/// The batch's commit: queues a commit for the consumer thread, or a backout if any message was nacked.
+fn batch_commit(unsettled: Unsettled) -> traits::BatchCommitFunc {
+    Box::new(move |dispositions: Vec<MessageDisposition>| {
+        Box::pin(async move {
+            // Stays armed until the job is queued: a cancelled commit backs out.
+            let mut unsettled = unsettled;
+            let epoch = unsettled.epoch;
+            let tx = unsettled.tx.clone().expect("settled once");
+            let (reply_tx, reply_rx) = oneshot::channel();
+            let should_backout = dispositions
+                .iter()
+                .any(|d| matches!(d, MessageDisposition::Nack));
+
+            let job = if !should_backout {
+                ConsumerJob::Commit { epoch, reply_tx }
+            } else {
+                ConsumerJob::Backout { epoch, reply_tx }
+            };
+            tx.send(job)
+                .await
+                .map_err(|_| anyhow::anyhow!("Consumer thread dead"))?;
+            unsettled.tx = None;
+            reply_rx
+                .await
+                .map_err(|_| anyhow::anyhow!("Consumer thread dropped reply"))??;
+            Ok(())
+        }) as traits::BoxFuture<'static, anyhow::Result<()>>
+    })
+}
+
+/// Commits or backs out the syncpoint and replies. Returns true when the connection failed.
+fn settle<C: AsConnection>(
+    conn: C,
+    commit: bool,
+    epoch: u64,
+    current_epoch: u64,
+    reply_tx: oneshot::Sender<Result<(), ConsumerError>>,
+) -> bool {
+    let action = if commit { "Commit" } else { "Backout" };
+    if epoch != current_epoch {
+        if commit {
+            warn!(
+                "Stale commit ignored (epoch {}, current {}); messages were backed out on reconnect",
+                epoch, current_epoch
+            );
+        }
+        let _ = reply_tx.send(Err(ConsumerError::Connection(anyhow::anyhow!(
+            "{} attempted for a stale connection after restart",
+            action
+        ))));
+        return false;
+    }
+    let sp = Syncpoint::new(conn);
+    let res = if commit { sp.commit() } else { sp.backout() };
+    let res = res
+        .map(|_| ())
+        .map_err(|e| ConsumerError::Connection(anyhow::anyhow!("{} failed: {}", action, e)));
+    let failed = res.is_err();
+    let _ = reply_tx.send(res);
+    failed
+}
+
+/// Queue depth and capacity; a missing inquire permission still counts as healthy.
+fn queue_status<C: AsConnection>(obj: &Object<C>, config: &IbmMqConfig) -> EndpointStatus {
+    let mut healthy = true;
+    let mut pending = None;
+    let mut capacity = None;
+    let mut error = None;
+
+    match obj.inquire(&[MQIA_CURRENT_Q_DEPTH, MQIA_MAX_Q_DEPTH]) {
+        Ok(values) => {
+            let mut iter = values.iter();
+            if let Some(InqResItem::Long(int_item)) = iter.next() {
+                pending = Some(int_item.int_attr()[0] as usize);
+            }
+            if let Some(InqResItem::Long(int_item)) = iter.next() {
+                capacity = Some(int_item.int_attr()[0] as usize);
+            }
+        }
+
+        Err(e) => {
+            if e.2 != constants::MQRC_NOT_OPEN_FOR_INQUIRE && e.2 != constants::MQRC_NOT_AUTHORIZED
+            {
+                healthy = false;
+                error = Some(format!("Failed to inquire queue status: {}", e));
+            }
+        }
+    }
+
+    EndpointStatus {
+        healthy,
+        target: config
+            .queue
+            .clone()
+            .or(config.topic.clone())
+            .unwrap_or_default(),
+        pending,
+        capacity,
+        error,
+        ..Default::default()
+    }
+}
+
 async fn spawn_consumer_thread(
     config: IbmMqConfig,
 ) -> Result<mpsc::Sender<ConsumerJob>, ConsumerError> {
@@ -596,41 +795,7 @@ async fn spawn_consumer_thread(
                 }
             };
 
-            let (_sub, obj) = match (|| -> anyhow::Result<_> {
-                let qm_ref = qm.connection_ref();
-                // Determine if we are acting as a Subscriber (Topic) or a Consumer (Queue)
-                if let Some(topic) = &config.topic {
-                    let topic_str =
-                        MqStr::<1024>::try_from(topic.as_str()).context("Invalid topic string")?;
-                    // Ephemeral managed subscription: no MQSO_RESUME, which would
-                    // require a subscription name (MQRC_SUB_NAME_ERROR otherwise).
-                    let sub_opts = (
-                        constants::MQSO_CREATE
-                            | constants::MQSO_MANAGED
-                            | constants::MQSO_NON_DURABLE,
-                        open::ObjectString(&topic_str),
-                    );
-                    let (sub, obj) = Subscription::subscribe_managed(qm_ref, sub_opts)
-                        .map_err(|e| anyhow::anyhow!("MQ subscribe failed: {}", e))?
-                        .discard_warning();
-                    Ok((Some(sub), obj))
-                } else {
-                    let q_name_str = config.queue.as_deref().ok_or_else(|| {
-                        anyhow::anyhow!("Queue name is required for IBM MQ consumer")
-                    })?;
-                    let q_name = MqStr::<48>::try_from(q_name_str).context("Invalid queue name")?;
-                    let od = QueueName(q_name);
-                    let mut open_options =
-                        constants::MQOO_INPUT_AS_Q_DEF | constants::MQOO_FAIL_IF_QUIESCING;
-                    if !config.disable_status_inq {
-                        open_options |= constants::MQOO_INQUIRE;
-                    }
-                    let obj = Object::open(qm_ref, &(od, open_options))
-                        .map_err(|e| anyhow::anyhow!("MQ open failed: {}", e))?
-                        .discard_warning();
-                    Ok((None, obj))
-                }
-            })() {
+            let (_sub, obj) = match open_source(qm.connection_ref(), &config) {
                 Ok(res) => res,
                 Err(e) => {
                     if let Some(tx) = init_tx.take() {
@@ -655,83 +820,8 @@ async fn spawn_consumer_thread(
                     ConsumerJob::Receive {
                         max_messages,
                         reply_tx,
-                    } => {
-                        let mut messages = Vec::with_capacity(max_messages);
-                        let mut error = None;
-                        let mut buffer = vec![0u8; config.max_message_size];
-
-                        for _ in 0..max_messages {
-                            let gmo = (
-                                constants::MQGMO_WAIT
-                                    | constants::MQGMO_SYNCPOINT
-                                    | constants::MQGMO_FAIL_IF_QUIESCING
-                                    // Strip pub/sub RFH2 so the clean body is
-                                    // delivered (otherwise topic gets yield empty data).
-                                    | constants::MQGMO_NO_PROPERTIES,
-                                get::GetWait::Wait(config.wait_timeout_ms),
-                            );
-
-                            let res: Result<Option<(_, MessageId)>, _> = match obj
-                                .get_data_with(&gmo, &mut buffer)
-                            {
-                                // Still on the queue: its cut-off start would be delivered forever.
-                                Ok(got)
-                                    if matches!(
-                                        got.warning(),
-                                        Some((constants::MQRC_TRUNCATED_MSG_FAILED, _))
-                                    ) =>
-                                {
-                                    error = Some(ConsumerError::Connection(anyhow::anyhow!(
-                                            "IBM MQ message is larger than max_message_size ({} bytes); raise max_message_size",
-                                            config.max_message_size
-                                        )));
-                                    break;
-                                }
-                                other => other.discard_warning(),
-                            };
-
-                            match res {
-                                Ok(opt) => {
-                                    if let Some((data, msg_id)) = opt {
-                                        let mut canonical = CanonicalMessage::new(
-                                            data.to_vec(),
-                                            message_id_from_msg_id(&msg_id.0),
-                                        );
-                                        // Source cursor: the queue this was read from.
-                                        // Opt-in via MQB_SOURCE_METADATA; off by default.
-                                        if crate::canonical_message::source_metadata_enabled() {
-                                            if let Some(queue) = config.queue.as_deref() {
-                                                canonical.set_metadata(
-                                                    "mqb.src.ibmmq_queue",
-                                                    queue.to_string(),
-                                                );
-                                            }
-                                        }
-                                        messages.push(canonical);
-                                        // zeroing buffer to avoid leaking sensitive data
-                                        let buffer_len = data.len();
-                                        buffer[..buffer_len].fill(0);
-                                    }
-                                }
-
-                                Err(e) => {
-                                    if e.0 == constants::MQCC_FAILED
-                                        && e.2 == constants::MQRC_NO_MSG_AVAILABLE
-                                    {
-                                        break;
-                                    }
-
-                                    error = Some(ConsumerError::Connection(anyhow::anyhow!(
-                                        "MQ get failed: {}",
-                                        e
-                                    )));
-
-                                    break;
-                                }
-                            }
-                        }
-
-                        if let Some(e) = error {
+                    } => match receive_messages(&obj, &config, max_messages) {
+                        (_, Some(e)) => {
                             // If an error occurred during batch retrieval (e.g. quiescing),
                             // we must backout any messages already retrieved in this syncpoint
                             // to ensure atomicity and avoid partial batch processing during shutdown.
@@ -739,140 +829,48 @@ async fn spawn_consumer_thread(
                             backout_with_logging!(&qm, "on batch retrieval error");
                             connection_error = true;
                             let _ = reply_tx.send(Err(e));
-                        } else if !messages.is_empty() {
-                            trace!(count = messages.len(), message_ids = ?LazyMessageIds(&messages), "Received batch of IBM MQ messages");
-                            let Some(tx_commit) = tx_loop.upgrade() else {
-                                backout_with_logging!(&qm, "for a dropped consumer");
-                                continue;
-                            };
-                            let epoch = current_epoch;
-                            let unsettled = Unsettled {
-                                tx: Some(tx_commit),
-                                epoch,
-                                backout_pending: Arc::clone(&backout_pending),
-                            };
-                            let commit_fn: traits::BatchCommitFunc =
-                                Box::new(move |dispositions: Vec<MessageDisposition>| {
-                                    Box::pin(async move {
-                                        // Stays armed until the job is queued: a cancelled commit backs out.
-                                        let mut unsettled = unsettled;
-                                        let tx = unsettled.tx.clone().expect("settled once");
-                                        let (reply_tx, reply_rx) = oneshot::channel();
-                                        let should_backout = dispositions
-                                            .iter()
-                                            .any(|d| matches!(d, MessageDisposition::Nack));
-
-                                        let job = if !should_backout {
-                                            ConsumerJob::Commit { epoch, reply_tx }
-                                        } else {
-                                            ConsumerJob::Backout { epoch, reply_tx }
-                                        };
-                                        tx.send(job)
-                                            .await
-                                            .map_err(|_| anyhow::anyhow!("Consumer thread dead"))?;
-                                        unsettled.tx = None;
-                                        reply_rx.await.map_err(|_| {
-                                            anyhow::anyhow!("Consumer thread dropped reply")
-                                        })??;
-                                        Ok(())
-                                    })
-                                        as traits::BoxFuture<'static, anyhow::Result<()>>
-                                });
-
-                            if reply_tx
-                                .send(Ok(ReceivedBatch {
-                                    messages,
-                                    commit: commit_fn,
-                                }))
-                                .is_err()
-                            {
-                                warn!("Consumer dropped reply channel, backing out transaction");
-                                backout_with_logging!(&qm, "on dropped reply channel");
-                            }
-                        } else {
+                        }
+                        (messages, None) if messages.is_empty() => {
                             let _ = reply_tx.send(Ok(ReceivedBatch {
                                 messages,
                                 commit: Box::new(|_| Box::pin(async { Ok(()) })),
                             }));
                         }
-                    }
+                        (messages, None) => {
+                            trace!(count = messages.len(), message_ids = ?LazyMessageIds(&messages), "Received batch of IBM MQ messages");
+                            let Some(tx_commit) = tx_loop.upgrade() else {
+                                backout_with_logging!(&qm, "for a dropped consumer");
+                                continue;
+                            };
+                            let commit = batch_commit(Unsettled {
+                                tx: Some(tx_commit),
+                                epoch: current_epoch,
+                                backout_pending: Arc::clone(&backout_pending),
+                            });
+                            if reply_tx
+                                .send(Ok(ReceivedBatch { messages, commit }))
+                                .is_err()
+                            {
+                                warn!("Consumer dropped reply channel, backing out transaction");
+                                backout_with_logging!(&qm, "on dropped reply channel");
+                            }
+                        }
+                    },
                     ConsumerJob::Commit { epoch, reply_tx } => {
-                        if epoch != current_epoch {
-                            warn!("Stale commit ignored (epoch {}, current {}); messages were backed out on reconnect", epoch, current_epoch);
-                            let _ = reply_tx.send(Err(ConsumerError::Connection(anyhow::anyhow!(
-                                "Commit attempted for a stale connection after restart"
-                            ))));
-                            continue;
-                        }
-                        let sp = Syncpoint::new(&qm);
-                        let res = sp.commit().map(|_| ()).map_err(|e| {
-                            ConsumerError::Connection(anyhow::anyhow!("Commit failed: {}", e))
-                        });
-                        if res.is_err() {
-                            connection_error = true;
-                        }
-                        let _ = reply_tx.send(res);
+                        connection_error |= settle(&qm, true, epoch, current_epoch, reply_tx);
                     }
                     ConsumerJob::Backout { epoch, reply_tx } => {
-                        if epoch != current_epoch {
-                            let _ = reply_tx.send(Err(ConsumerError::Connection(anyhow::anyhow!(
-                                "Backout attempted for a stale connection after restart"
-                            ))));
-                            continue;
-                        }
-                        let sp = Syncpoint::new(&qm);
-                        let res = sp.backout().map(|_| ()).map_err(|e| {
-                            ConsumerError::Connection(anyhow::anyhow!("Backout failed: {}", e))
-                        });
-                        if res.is_err() {
-                            connection_error = true;
-                        }
-                        let _ = reply_tx.send(res);
+                        connection_error |= settle(&qm, false, epoch, current_epoch, reply_tx);
                     }
                     ConsumerJob::Status { reply_tx } => {
-                        let mut healthy = true;
-                        let mut pending = None;
-                        let mut capacity = None;
-                        let mut error = None;
-
-                        match obj.inquire(&[MQIA_CURRENT_Q_DEPTH, MQIA_MAX_Q_DEPTH]) {
-                            Ok(values) => {
-                                let mut iter = values.iter();
-                                if let Some(InqResItem::Long(int_item)) = iter.next() {
-                                    pending = Some(int_item.int_attr()[0] as usize);
-                                }
-                                if let Some(InqResItem::Long(int_item)) = iter.next() {
-                                    capacity = Some(int_item.int_attr()[0] as usize);
-                                }
-                            }
-
-                            Err(e) => {
-                                if e.2 != constants::MQRC_NOT_OPEN_FOR_INQUIRE
-                                    && e.2 != constants::MQRC_NOT_AUTHORIZED
-                                {
-                                    healthy = false;
-                                    error = Some(format!("Failed to inquire queue status: {}", e));
-                                }
-                            }
-                        }
-
-                        let _ = reply_tx.send(EndpointStatus {
-                            healthy,
-                            target: config
-                                .queue
-                                .clone()
-                                .or(config.topic.clone())
-                                .unwrap_or_default(),
-                            pending,
-                            capacity,
-                            error,
-                            ..Default::default()
-                        });
+                        let _ = reply_tx.send(queue_status(&obj, &config));
                     }
                 }
 
                 if connection_error {
-                    warn!("Connection error detected in consumer thread, backing out any active transaction before reconnecting.");
+                    warn!(
+                        "Connection error detected in consumer thread, backing out any active transaction before reconnecting."
+                    );
                     backout_with_logging!(&qm, "on reconnect");
                     break;
                 }
@@ -882,7 +880,9 @@ async fn spawn_consumer_thread(
                 // This means the loop exited because the rx channel was closed.
                 // This happens when the IbmMqConsumer struct is dropped.
                 // We should backout any active transaction before exiting.
-                info!("IBM MQ consumer channel closed, backing out any active transaction before exiting thread.");
+                info!(
+                    "IBM MQ consumer channel closed, backing out any active transaction before exiting thread."
+                );
                 backout_with_logging!(&qm, "on channel close");
                 break;
             }

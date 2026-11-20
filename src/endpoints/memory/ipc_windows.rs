@@ -120,23 +120,6 @@ impl WindowsIpcTransport {
             )),
         }
     }
-
-    /// Whether a read error means the peer hung up (so we should re-accept) rather than a
-    /// fatal fault. Mirrors `is_disconnected` in ipc_unix.rs.
-    fn is_disconnected(error: &anyhow::Error) -> bool {
-        error
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|io_error| {
-                matches!(
-                    io_error.kind(),
-                    std::io::ErrorKind::UnexpectedEof
-                        | std::io::ErrorKind::BrokenPipe
-                        | std::io::ErrorKind::ConnectionReset
-                        | std::io::ErrorKind::ConnectionAborted
-                        | std::io::ErrorKind::NotConnected
-                )
-            })
-    }
 }
 
 #[async_trait]
@@ -197,7 +180,7 @@ impl TransportChannel for WindowsIpcTransport {
                 }
                 // The client went away. Drop the spent handle and stand up a fresh pipe
                 // instance so the next publisher reconnect is served, mirroring ipc_unix.rs.
-                Err(error) if Self::is_disconnected(&error) => {
+                Err(error) if framed::is_disconnected(&error) => {
                     warn!(pipe = %self.inner.pipe_name, error = %error, "Named Pipe peer disconnected; waiting for a new connection");
                     let mut guard = self.inner.server.lock().await;
                     match ServerOptions::new().create(&self.inner.pipe_name) {

@@ -106,7 +106,7 @@ column's type. Expressions in the `VALUES (…)` tuple are fine: a batch is stil
 | `key` | (Publisher, with `columns`) Key column(s), comma-separated. A row with the same key is updated; needs a `UNIQUE` or `PRIMARY KEY` on them. |
 | `extra_column` | (Publisher, with `columns`) Column that takes the fields without a column of their own, as one JSON object (`jsonb`, `json` or text). |
 | `insert_query` | Custom statement with `${payload:field}` / `${metadata:key}` tokens: an `INSERT` for multi-column writes, or an `UPDATE` / `DELETE`. |
-| `bulk_copy` | PostgreSQL only — use `COPY FROM STDIN` for high-throughput bulk loads. |
+| `bulk_copy` | PostgreSQL only — use `COPY FROM STDIN` for high-throughput bulk loads; see [Fast bulk loads](#fast-bulk-loads). |
 | `load_mode` | (Publisher, drain routes) `atomic_append` or `replace`: one transaction for the whole load, committed at its end. See [Loading as one unit](#loading-as-one-unit). |
 | `before_load` / `after_load` | (Publisher, with `load_mode`) SQL run in the load's transaction before its first row / before it commits. |
 | `delete_after_read` | Consumer deletes rows after they're processed (mutually exclusive with `cursor_column`). |
@@ -138,8 +138,11 @@ last value read:
 - A row that appears later with a smaller value is never read. This happens with a sequence
   when a long transaction commits after a shorter one that took a higher number. On
   PostgreSQL the reader stops each page before the first row written by a transaction that
-  is not older than every open one, so a sequence column is safe; while a write transaction
-  stays open anywhere on the server, newer rows wait for it. A column filled from `now()`
+  is not older than every open one; while a write transaction stays open anywhere on the
+  server, newer rows wait for it. The guard sees a transaction only from its first write, so
+  a sequence number drawn earlier (a `nextval()` in a previous statement, or the moment inside
+  the `INSERT` before the row is written) can still be skipped; that window is small when the
+  `INSERT` itself draws the number. A column filled from `now()`
   (the transaction's start time) or by the application can still go wrong, and so can a view,
   which has no `xmin` (the reader logs a warning). On MySQL, MariaDB and SQLite there is no
   such guard. Where writers run concurrently, prefer [PostgreSQL CDC](#postgresql-cdc).
@@ -199,8 +202,9 @@ work:
 
 - The source claims a batch of rows for 60 seconds (`locked_until`) and skips rows another
   consumer has claimed, so several consumers can share one table.
-- With `delete_after_read: true` an acknowledged row is deleted. A row that failed stays and
-  is delivered again when its claim ends.
+- With `delete_after_read: true` an acknowledged row is deleted. A nacked row is released
+  and delivered again at once; a row held by a consumer that died is delivered again when
+  its claim ends.
 - **Set `delete_after_read: true` for a queue.** Without it a row is only hidden for the
   60 seconds of its claim: nothing marks it as done, so it is delivered again and again, once
   a minute, for as long as the route runs. The default is off so that a route deletes nothing
@@ -216,10 +220,55 @@ work:
 |---|---|
 | Fields into the columns of the same name, with upsert | `columns: auto`, `key`; see [Writing by column name](#writing-by-column-name) |
 | Your own statement, renamed fields, casts, `ON CONFLICT … DO NOTHING` | `insert_query` with `${payload:field}` tokens; see [Upserts](../cookbook/upserts.md) |
-| Fastest load into PostgreSQL | `bulk_copy: true`, with `columns: auto` or a token `insert_query` |
+| Fastest load into PostgreSQL | `bulk_copy: true`, with `columns: auto` or a token `insert_query` (one bare `${payload:…}` token per value), plus `batch_size` and `concurrency`; see [Fast bulk loads](#fast-bulk-loads) |
 | The whole payload in one column | neither; see [Queue tables](#queue-tables) |
 | Readers see the old rows or all new ones, never half a load | `load_mode`; see [Loading as one unit](#loading-as-one-unit) |
 | Delete or update the row a message names, e.g. a CDC `delete` | `insert_query` with `DELETE` or `UPDATE`; see [Deleting rows](#deleting-rows) |
+
+### Fast bulk loads
+
+Each batch is one statement (`COPY` or `INSERT`) with its own commit, and with `concurrency: 1`
+the route waits for it before it writes the next batch. PostgreSQL spends a fixed amount on
+every statement (about 2 ms in the measurement below), so small batches are dominated by it.
+With `columns: auto`, consecutive records that name different fields need separate
+statements, so a batch only shares one statement while its records have the same field set.
+
+With `bulk_copy` and an `insert_query`, every `VALUES` entry must be one bare `${…}` token:
+expressions such as `CAST(${payload:qty} AS integer)`, `ON CONFLICT` and `RETURNING` are
+rejected. Use `columns: auto` to get the type casts.
+
+- **`batch_size: 5000` or more with `bulk_copy`** spreads that fixed cost over more rows.
+  `INSERT` does not gain from it.
+- **`concurrency: 2`–`4`** on the route keeps several batches in flight, each on its own
+  connection, so the database writes one while the next is prepared. Batches can then commit
+  out of source order; rows within a batch keep theirs. Keep `max_connections` at least as high.
+- **With `load_mode`** every batch goes into the one held transaction, so `concurrency` does
+  not help there; only `batch_size` does.
+
+```yaml
+input:
+  file: { path: "/data/readings.jsonl", format: payload }
+output:
+  sqlx: { url: "postgres://user:pass@localhost/app", table: readings, columns: auto, bulk_copy: true }
+batch_size: 5000
+concurrency: 4
+exit_on_empty: true
+```
+
+Rows/s for 200,000 JSON records (6 columns) from a file into PostgreSQL 16 in Docker on an
+Apple M1, `columns: auto`:
+
+| `batch_size` | `concurrency` | `INSERT` | `bulk_copy` |
+|---:|---:|---:|---:|
+| 1,000 | 1 | 171,000 | 121,000 |
+| 1,000 | 4 | 430,000 | 414,000 |
+| 5,000 | 1 | 152,000 | 207,000 |
+| 5,000 | 4 | 281,000 | 570,000 |
+| 20,000 | 4 | 261,000 | 493,000 |
+
+With 1,000-row batches `COPY` brings nothing over `INSERT`; it pulls ahead from about 5,000
+rows per batch. With 1M records, `bulk_copy`, `batch_size: 5000` and `concurrency: 4` loaded
+696,000 rows/s.
 
 A row the database rejects for a reason that will not change (a type error, a violated
 constraint) fails as non-retryable and goes to a [`dlq`](../cookbook/dlq.md) if one is
@@ -313,8 +362,11 @@ unchanged, and the copy exits non-zero.
   commits the open transaction, so keep both to DML there.
 - **The table must exist.** On MySQL a `CREATE TABLE` commits any open transaction, so create
   the table before the load.
-- **Add `bulk_copy`.** A load is all or nothing anyway, so `COPY` gives up nothing here. With
-  1,000-row batches it loaded 1M CSV rows 15–25% faster than `INSERT`.
+- **On PostgreSQL, add `bulk_copy` and raise `batch_size`.** A load is all or nothing anyway,
+  so `COPY` gives up nothing here. It cannot be combined with `key`: `COPY` has no upsert, and
+  the load's transaction does not change that. MySQL and MariaDB have no `bulk_copy`. With 1,000-row batches it loaded 1M CSV rows 15–25% faster than `INSERT`;
+  with 10,000-row batches 1M JSON rows went from 156,000 to 236,000 rows/s. See
+  [Fast bulk loads](#fast-bulk-loads).
 - **One long transaction.** It stays open for the whole run, so server limits such as
   PostgreSQL's `idle_in_transaction_session_timeout` or a pooler's transaction timeout must
   allow the longest pause between two batches; MySQL's undo log grows with the load.
@@ -340,6 +392,25 @@ unchanged, and the copy exits non-zero.
   `PRIMARY KEY` index and becomes `ON DUPLICATE KEY UPDATE`.
 - **SQLite.** `sqlite:///var/data/app.db` is an absolute path, `sqlite://app.db` a relative
   one. A sink creates the file when it does not exist.
+
+## How values are rendered
+
+A PostgreSQL row reaches JSON on three paths, and they do not render every type the same way:
+
+| Type | `sqlx` source (`cursor_column`) | `postgres_cdc`, including the `capture_all` / `snapshot` back fill | Row read by `lookup_query` / the batch redo (`to_json`) |
+|---|---|---|---|
+| `int`, `bigint`, `bool`, `text` | number, boolean, string | same | same |
+| `float8` / `real` | number; `NaN` and `Infinity` are `null` | number; `NaN` and `Infinity` are strings | number; `NaN` and `Infinity` are strings |
+| `numeric` | string | string | number |
+| `bytea` | hex string without `\x` | base64 string | `"\\x…"` string |
+| dates, timestamps | Postgres text (`timestamps: rfc3339` for RFC 3339) | Postgres text, ISO style | ISO 8601 with `T` |
+| `json` / `jsonb` | embedded | embedded | embedded |
+| arrays | JSON array (`to_jsonb`) | 1-D arrays of the common types as JSON arrays, element by element as above; others Postgres text | JSON array |
+
+A back fill spelled out by hand as a `sequence` with a `sqlx` phase keeps the `sqlx` column, so
+its rows can differ from the CDC rows that follow; `consume: capture_all` does not. A `char(n)`
+value loses its trailing spaces in a back fill, while the CDC phase keeps them. To make two
+paths agree, normalise the field with a [`transform`](../cookbook/transform.md).
 
 ## Recipes
 
@@ -421,7 +492,8 @@ The payload is the row as a JSON object; the metadata names the change: `postgre
   are read as doubles too.
 - `bytea` is base64. Dates, times, `uuid` and `interval` are the text Postgres prints.
   `NaN` and `Infinity` are strings. One-dimensional arrays of the common types are JSON
-  arrays; other arrays, ranges, enums and composite types are their Postgres text.
+  arrays; other arrays, ranges, enums and composite types are their Postgres text. How
+  this compares with the other read paths: [How values are rendered](#how-values-are-rendered).
 
 Full field list: [reference/postgres-cdc.md](../reference/postgres-cdc.md).
 

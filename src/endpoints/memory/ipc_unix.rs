@@ -203,28 +203,13 @@ impl UnixIpcTransport {
                     );
                     return Ok(messages);
                 }
-                Err(error) if Self::is_disconnected(&error) => {
+                Err(error) if framed::is_disconnected(&error) => {
                     warn!(path = %self.inner.socket_path, error = %error, "Unix IPC peer disconnected; waiting for a new connection");
                     *conn_guard = None;
                 }
                 Err(error) => return Err(error),
             }
         }
-    }
-
-    fn is_disconnected(error: &anyhow::Error) -> bool {
-        error
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|io_error| {
-                matches!(
-                    io_error.kind(),
-                    std::io::ErrorKind::UnexpectedEof
-                        | std::io::ErrorKind::BrokenPipe
-                        | std::io::ErrorKind::ConnectionReset
-                        | std::io::ErrorKind::ConnectionAborted
-                        | std::io::ErrorKind::NotConnected
-                )
-            })
     }
 }
 

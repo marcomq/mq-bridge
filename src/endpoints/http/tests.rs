@@ -1979,6 +1979,19 @@ async fn test_sensitive_request_headers_reach_handler_verbatim() {
 }
 
 #[tokio::test]
+async fn test_message_id_header_reads_decimal_before_unprefixed_hex() {
+    for (header, expected) in [("42", 42), ("0x2a", 42), ("ff", 255)] {
+        let message = handler_message_for_request(
+            HttpConfig::default(),
+            &[("message-id", header)],
+            Bytes::new(),
+        )
+        .await;
+        assert_eq!(message.message_id, expected, "message-id: {header}");
+    }
+}
+
+#[tokio::test]
 async fn test_forward_headers_keeps_only_listed_headers() {
     let config = HttpConfig::default()
         .with_forward_headers(vec!["X-Trace-Id".into(), "authorization".into()]);

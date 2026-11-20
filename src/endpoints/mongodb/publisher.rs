@@ -46,6 +46,17 @@ const UPDATE_CONCURRENCY: usize = 16;
 /// Most messages of one key folded into one `update` call; bounds the snapshots it stores.
 const MAX_FOLDED_UPDATES: usize = 64;
 
+/// Expires documents `ttl` after their `created_at`.
+fn ttl_index(ttl: Duration) -> IndexModel {
+    let options = mongodb::options::IndexOptions::builder()
+        .expire_after(ttl)
+        .build();
+    IndexModel::builder()
+        .keys(doc! { "created_at": 1 })
+        .options(options)
+        .build()
+}
+
 impl MongoDbPublisher {
     pub async fn new(config: &MongoDbConfig) -> anyhow::Result<Self> {
         let id_template = config
@@ -72,23 +83,17 @@ impl MongoDbPublisher {
             .collection
             .as_deref()
             .ok_or_else(|| anyhow!("Collection name is required for MongoDB publisher"))?;
-        let find = config
-            .find
-            .as_deref()
-            .map(|t| {
-                CompiledTemplate::compile(t, Some("application/json"))
-                    .context("invalid MongoDB `find` template")
-            })
-            .transpose()?;
+        let json_template = |template: Option<&str>, name: &str| {
+            template
+                .map(|t| {
+                    CompiledTemplate::compile(t, Some("application/json"))
+                        .with_context(|| format!("invalid MongoDB `{name}` template"))
+                })
+                .transpose()
+        };
+        let find = json_template(config.find.as_deref(), "find")?;
         let find_list = list_query(config.find.as_deref(), "find")?;
-        let aggregate_query = config
-            .aggregate_query
-            .as_deref()
-            .map(|t| {
-                CompiledTemplate::compile(t, Some("application/json"))
-                    .context("invalid MongoDB `aggregate_query` template")
-            })
-            .transpose()?;
+        let aggregate_query = json_template(config.aggregate_query.as_deref(), "aggregate_query")?;
         let aggregate_list = list_query(config.aggregate_query.as_deref(), "aggregate_query")?;
         if let Some((list, _)) = &aggregate_list {
             check_batch_pipeline(list)?;
@@ -96,14 +101,7 @@ impl MongoDbPublisher {
         if aggregate_query.is_some() && (find.is_some() || config.update.is_some()) {
             anyhow::bail!("MongoDB `aggregate_query` cannot be combined with `find` or `update`");
         }
-        let update = config
-            .update
-            .as_deref()
-            .map(|t| {
-                CompiledTemplate::compile(t, Some("application/json"))
-                    .context("invalid MongoDB `update` template")
-            })
-            .transpose()?;
+        let update = json_template(config.update.as_deref(), "update")?;
         if update.is_some() && find.is_none() {
             anyhow::bail!("MongoDB `update` requires `find`");
         }
@@ -198,14 +196,7 @@ impl MongoDbPublisher {
 
         // With `load_mode` the staging collection gets it, so the target is unchanged until the swap.
         if let Some(ttl) = ttl.filter(|_| load.is_none()) {
-            let options = mongodb::options::IndexOptions::builder()
-                .expire_after(ttl)
-                .build();
-            let model = IndexModel::builder()
-                .keys(doc! { "created_at": 1 })
-                .options(options)
-                .build();
-            if let Err(e) = collection.create_index(model).await {
+            if let Err(e) = collection.create_index(ttl_index(ttl)).await {
                 warn!(
                     "Failed to create TTL index on publisher collection {} : {}",
                     collection_name, e
@@ -226,15 +217,8 @@ impl MongoDbPublisher {
                 );
             }
             // Also apply TTL to the reply collection if configured, to clean up unconsumed replies.
-            if let Some(ttl) = config.ttl_seconds {
-                let options = mongodb::options::IndexOptions::builder()
-                    .expire_after(Duration::from_secs(ttl))
-                    .build();
-                let model = IndexModel::builder()
-                    .keys(doc! { "created_at": 1 })
-                    .options(options)
-                    .build();
-                if let Err(e) = reply_collection.create_index(model).await {
+            if let Some(ttl) = ttl {
+                if let Err(e) = reply_collection.create_index(ttl_index(ttl)).await {
                     warn!(
                         "Failed to create TTL index on reply collection {} : {}",
                         reply_collection_name, e

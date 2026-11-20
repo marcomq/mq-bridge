@@ -47,6 +47,19 @@ conda install -c marcomq -c conda-forge mq-bridge-app
 The `marcomq` channel carries mq-bridge itself; `conda-forge` supplies its build
 and runtime dependencies.
 
+mq-bridge is also packaged on conda-forge itself
+([feedstock](https://github.com/conda-forge/mq-bridge-feedstock), maintained by
+[phreed](https://github.com/phreed)), so it installs from that channel alone, or
+with `pixi`:
+
+```bash
+conda install -c conda-forge mq-bridge-app
+pixi add mq-bridge-app
+```
+
+This build links its native libraries (librdkafka, OpenSSL, …) from the conda
+environment instead of bundling them.
+
 ### `cargo binstall` — prebuilt binary
 
 Downloads the prebuilt CLI from [Releases](https://github.com/marcomq/mq-bridge/releases)
@@ -163,7 +176,8 @@ Embed the core engine in your own code — produce or consume messages with a un
 API, one config format across all three bindings:
 
 - **Rust** — [`mq-bridge`](https://github.com/marcomq/mq-bridge) (`cargo add mq-bridge`)
-- **Python** — [`pip install mq-bridge`](https://pypi.org/project/mq-bridge/)
+- **Python** — [`pip install mq-bridge`](https://pypi.org/project/mq-bridge/), or
+  `conda install -c conda-forge mq-bridge-py` from conda-forge
 - **Node.js** — [`npm install mq-bridge`](https://www.npmjs.com/package/mq-bridge)
 
 The core of the library are the `MessageConsumer` and `MessagePublisher` traits,

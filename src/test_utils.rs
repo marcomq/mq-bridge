@@ -2085,7 +2085,7 @@ pub mod bench {
         records
             .iter()
             .filter_map(|record| {
-                crate::endpoints::file::parse_message(record, &FileFormat::Csv, &mut header)
+                crate::codec::format::parse_message(record, &FileFormat::Csv, &mut header)
             })
             .collect()
     }
@@ -2106,7 +2106,7 @@ pub mod bench {
                 buf.extend_from_slice(record);
                 spans.push((start, buf.len(), i as u64));
             }
-            decoded += crate::endpoints::file::decode_records(
+            decoded += crate::codec::format::decode_records(
                 &mut buf,
                 &spans,
                 &FileFormat::Csv,

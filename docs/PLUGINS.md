@@ -1088,8 +1088,8 @@ python -m mq_bridge.plugin_packaging --package python/my_plugin --out dist
 mq-bridge-package-plugin --package node --pack --out npm
 ```
 
-[`examples/plugin-template`](../examples/plugin-template) is a complete plugin
-repository to copy: a small working endpoint, the npm and Python packages, the
+[`mq-bridge-plugin-template`](https://github.com/marcomq/mq-bridge-plugin-template)
+is a complete plugin repository to start from with GitHub's "Use this template": a small working endpoint, the npm and Python packages, the
 conda recipe, the Homebrew formula script, and the CI and release workflows. Its
 README lists the accounts and secrets the release workflow needs.
 

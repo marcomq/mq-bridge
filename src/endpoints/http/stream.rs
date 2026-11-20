@@ -2,7 +2,7 @@
 // (stable since 1.80) is always available here; the crate-wide 1.75 MSRV doesn't apply.
 #![allow(clippy::incompatible_msrv)]
 
-use super::{HttpReply, HttpSourceMessage};
+use super::{full, streamed, text_error_response, BoxBody, HttpReply, HttpSourceMessage};
 use crate::support::sse::{find_sse_event_end, parse_sse_event, ParsedSseEvent};
 use crate::traits::{
     BoxFuture, CommitFunc, MessageDisposition, MessagePublisher, PublisherError, Sent,
@@ -11,7 +11,6 @@ use crate::CanonicalMessage;
 use anyhow::anyhow;
 use bytes::Bytes;
 use http_body_util::BodyExt;
-use http_body_util::StreamBody;
 use hyper::body::Frame;
 use hyper::body::Incoming;
 use hyper::{Response, StatusCode};
@@ -19,25 +18,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, trace, warn};
 
-type BoxBody = http_body_util::combinators::BoxBody<Bytes, anyhow::Error>;
 type HttpStreamResponseTx = async_channel::Sender<Result<Frame<Bytes>, anyhow::Error>>;
 
 pub(super) enum PublishResponseStreamError {
     BeforePublish(PublisherError),
     Partial(PublisherError),
-}
-
-fn full<T: Into<Bytes>>(chunk: T) -> BoxBody {
-    http_body_util::Full::new(chunk.into())
-        .map_err(|_| anyhow!("Infallible"))
-        .boxed()
-}
-
-fn streamed<S>(stream: S) -> BoxBody
-where
-    S: futures::Stream<Item = Result<Frame<Bytes>, anyhow::Error>> + Send + Sync + 'static,
-{
-    StreamBody::new(stream).boxed()
 }
 
 /// Rejects an NDJSON/SSE stream whose un-drained accumulation (a single record with no
@@ -56,35 +41,6 @@ fn bound_stream_buffer(buffer: &[u8]) -> anyhow::Result<()> {
 /// The same cap for a response stream: a retry would meet the same record.
 fn bound_response_buffer(buffer: &[u8]) -> Result<(), PublisherError> {
     bound_stream_buffer(buffer).map_err(PublisherError::NonRetryable)
-}
-
-fn has_content_type_header(headers: &HashMap<String, String>) -> bool {
-    headers
-        .keys()
-        .any(|key| key.eq_ignore_ascii_case("content-type"))
-}
-
-fn text_error_response(
-    status: StatusCode,
-    body: impl Into<Bytes>,
-    accepts_text: bool,
-    custom_headers: Option<&HashMap<String, String>>,
-) -> Response<BoxBody> {
-    let mut builder = Response::builder().status(status);
-
-    if let Some(custom_headers) = custom_headers {
-        for (header_name, header_value) in custom_headers {
-            builder = builder.header(header_name.as_str(), header_value.as_str());
-        }
-
-        if accepts_text && !has_content_type_header(custom_headers) {
-            builder = builder.header("content-type", "text/plain; charset=utf-8");
-        }
-    } else if accepts_text {
-        builder = builder.header("content-type", "text/plain; charset=utf-8");
-    }
-
-    builder.body(full(body)).unwrap()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -114,23 +70,12 @@ pub(super) fn header_contains_media(headers: &hyper::HeaderMap, name: &str, need
     })
 }
 
-pub(super) fn stream_request_format(headers: &hyper::HeaderMap) -> HttpStreamFormat {
-    if header_contains_media(headers, "content-type", "text/event-stream") {
+/// The stream format a request sends (`content-type`) or asks for back (`accept`).
+pub(super) fn stream_format(headers: &hyper::HeaderMap, header: &str) -> HttpStreamFormat {
+    if header_contains_media(headers, header, "text/event-stream") {
         HttpStreamFormat::Sse
-    } else if header_contains_media(headers, "content-type", "application/x-ndjson")
-        || header_contains_media(headers, "content-type", "application/jsonl")
-    {
-        HttpStreamFormat::Ndjson
-    } else {
-        HttpStreamFormat::RawChunks
-    }
-}
-
-pub(super) fn stream_response_format(headers: &hyper::HeaderMap) -> HttpStreamFormat {
-    if header_contains_media(headers, "accept", "text/event-stream") {
-        HttpStreamFormat::Sse
-    } else if header_contains_media(headers, "accept", "application/x-ndjson")
-        || header_contains_media(headers, "accept", "application/jsonl")
+    } else if header_contains_media(headers, header, "application/x-ndjson")
+        || header_contains_media(headers, header, "application/jsonl")
     {
         HttpStreamFormat::Ndjson
     } else {
@@ -977,14 +922,17 @@ mod tests {
             hyper::header::CONTENT_TYPE,
             hyper::header::HeaderValue::from_static("text/event-stream; charset=utf-8"),
         )]);
-        assert_eq!(stream_request_format(&sse_headers), HttpStreamFormat::Sse);
+        assert_eq!(
+            stream_format(&sse_headers, "content-type"),
+            HttpStreamFormat::Sse
+        );
 
         let ndjson_headers = hyper::HeaderMap::from_iter([(
             hyper::header::ACCEPT,
             hyper::header::HeaderValue::from_static("application/json, application/x-ndjson"),
         )]);
         assert_eq!(
-            stream_response_format(&ndjson_headers),
+            stream_format(&ndjson_headers, "accept"),
             HttpStreamFormat::Ndjson
         );
     }

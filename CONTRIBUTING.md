@@ -25,7 +25,7 @@ Thank you for your interest in contributing to **mq-bridge**! We welcome bug rep
 
 - **New endpoints or middleware:**
   - Add new files in `src/endpoints/` or `src/middleware/`.
-  - Update factory functions in `mod.rs` as needed.
+  - Update factory functions in `src/endpoints.rs` or `src/middleware.rs` as needed.
   - Add configuration models to `src/models.rs`.
 - **Tests:**
   - Add or update unit tests in the relevant module.

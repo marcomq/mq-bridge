@@ -1,4 +1,4 @@
-version       = "1.6.1"
+version       = "1.6.2"
 author        = "Marco Mengelkoch"
 description   = "Nim binding of mq-bridge: move messages between brokers, databases, files and HTTP"
 license       = "MIT OR Apache-2.0"
@@ -6,7 +6,7 @@ srcDir        = "src"
 
 requires "nim >= 2.0.0"
 
-import std/os
+import std/[os, strutils]
 
 proc getLib() =
   ## Downloads this release's C library into src/lib, where the binding looks first.
@@ -14,7 +14,11 @@ proc getLib() =
              elif defined(macosx): "libmq_bridge.dylib"
              else: "libmq_bridge.so"
   let dir = thisDir() / "src" / "lib"
-  if fileExists(dir / file) or getEnv("MQB_SKIP_LIB_DOWNLOAD").len > 0:
+  let marker = dir / file & ".version"
+  if getEnv("MQB_SKIP_LIB_DOWNLOAD").len > 0:
+    return
+  # A library without a marker was put there by hand and is kept.
+  if fileExists(dir / file) and (not fileExists(marker) or readFile(marker).strip == version):
     return
   let target =
     when defined(windows): "x86_64-pc-windows-msvc"
@@ -32,6 +36,7 @@ proc getLib() =
                                " && tar -xf \"" & tmp / archive & "\" -C \"" & tmp & "\"")
   if code == 0:
     cpFile(tmp / "lib" / file, dir / file)
+    writeFile(marker, version)
     echo "mq_bridge: downloaded ", file, " ", version, " to ", dir
   else:
     echo "mq_bridge: could not download ", url, ": ", output

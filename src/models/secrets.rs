@@ -546,74 +546,19 @@ impl SecretExtractor for EncryptionConfig {
 
 impl SecretExtractor for AwsConfig {
     fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
-        if let Some(val) = self.access_key.take() {
-            secrets.insert(format!("{}__{}", prefix, "ACCESS_KEY"), val);
-        }
-        if let Some(val) = self.secret_key.take() {
-            secrets.insert(format!("{}__{}", prefix, "SECRET_KEY"), val);
-        }
-        if let Some(val) = self.session_token.take() {
-            secrets.insert(format!("{}__{}", prefix, "SESSION_TOKEN"), val);
-        }
+        take_secret(secrets, prefix, "ACCESS_KEY", &mut self.access_key);
+        take_secret(secrets, prefix, "SECRET_KEY", &mut self.secret_key);
+        take_secret(secrets, prefix, "SESSION_TOKEN", &mut self.session_token);
         extract_sensitive_optional_url(&mut self.queue_url, prefix, "QUEUE_URL", secrets);
         extract_sensitive_optional_url(&mut self.endpoint_url, prefix, "ENDPOINT_URL", secrets);
-    }
-}
-
-impl SecretExtractor for KafkaConfig {
-    fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
-        extract_sensitive_url(&mut self.url, prefix, "URL", secrets);
-        if let Some(val) = self.username.take() {
-            secrets.insert(format!("{}__{}", prefix, "USERNAME"), val);
-        }
-        if let Some(val) = self.password.take() {
-            secrets.insert(format!("{}__{}", prefix, "PASSWORD"), val);
-        }
-        self.tls
-            .extract_secrets(&format!("{}__{}", prefix, "TLS"), secrets);
-    }
-}
-
-impl SecretExtractor for NatsConfig {
-    fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
-        extract_sensitive_url(&mut self.url, prefix, "URL", secrets);
-        if let Some(val) = self.username.take() {
-            secrets.insert(format!("{}__{}", prefix, "USERNAME"), val);
-        }
-        if let Some(val) = self.password.take() {
-            secrets.insert(format!("{}__{}", prefix, "PASSWORD"), val);
-        }
-        if let Some(val) = self.token.take() {
-            secrets.insert(format!("{}__{}", prefix, "TOKEN"), val);
-        }
-        self.tls
-            .extract_secrets(&format!("{}__{}", prefix, "TLS"), secrets);
-    }
-}
-
-impl SecretExtractor for AmqpConfig {
-    fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
-        extract_sensitive_url(&mut self.url, prefix, "URL", secrets);
-        if let Some(val) = self.username.take() {
-            secrets.insert(format!("{}__{}", prefix, "USERNAME"), val);
-        }
-        if let Some(val) = self.password.take() {
-            secrets.insert(format!("{}__{}", prefix, "PASSWORD"), val);
-        }
-        self.tls
-            .extract_secrets(&format!("{}__{}", prefix, "TLS"), secrets);
     }
 }
 
 impl SecretExtractor for MongoDbConfig {
     fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
         extract_sensitive_url(&mut self.url, prefix, "URL", secrets);
-        if let Some(val) = self.username.take() {
-            secrets.insert(format!("{}__{}", prefix, "USERNAME"), val);
-        }
-        if let Some(val) = self.password.take() {
-            secrets.insert(format!("{}__{}", prefix, "PASSWORD"), val);
-        }
+        take_secret(secrets, prefix, "USERNAME", &mut self.username);
+        take_secret(secrets, prefix, "PASSWORD", &mut self.password);
         // The checkpoint store URL may embed connection credentials.
         extract_sensitive_optional_url(
             &mut self.checkpoint_store,
@@ -621,20 +566,6 @@ impl SecretExtractor for MongoDbConfig {
             "CHECKPOINT_STORE",
             secrets,
         );
-        self.tls
-            .extract_secrets(&format!("{}__{}", prefix, "TLS"), secrets);
-    }
-}
-
-impl SecretExtractor for MqttConfig {
-    fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
-        extract_sensitive_url(&mut self.url, prefix, "URL", secrets);
-        if let Some(val) = self.username.take() {
-            secrets.insert(format!("{}__{}", prefix, "USERNAME"), val);
-        }
-        if let Some(val) = self.password.take() {
-            secrets.insert(format!("{}__{}", prefix, "PASSWORD"), val);
-        }
         self.tls
             .extract_secrets(&format!("{}__{}", prefix, "TLS"), secrets);
     }
@@ -673,68 +604,20 @@ impl SecretExtractor for WebSocketConfig {
     }
 }
 
-impl SecretExtractor for IbmMqConfig {
-    fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
-        extract_sensitive_url(&mut self.url, prefix, "URL", secrets);
-        if let Some(val) = self.username.take() {
-            secrets.insert(format!("{}__{}", prefix, "USERNAME"), val);
-        }
-        if let Some(val) = self.password.take() {
-            secrets.insert(format!("{}__{}", prefix, "PASSWORD"), val);
-        }
-        self.tls
-            .extract_secrets(&format!("{}__{}", prefix, "TLS"), secrets);
-    }
-}
-
 impl SecretExtractor for ZeroMqConfig {
     fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
         extract_sensitive_url(&mut self.url, prefix, "URL", secrets);
     }
 }
 
-impl SecretExtractor for RedisStreamsConfig {
-    fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
-        extract_sensitive_url(&mut self.url, prefix, "URL", secrets);
-        if let Some(val) = self.username.take() {
-            secrets.insert(format!("{}__{}", prefix, "USERNAME"), val);
-        }
-        if let Some(val) = self.password.take() {
-            secrets.insert(format!("{}__{}", prefix, "PASSWORD"), val);
-        }
-        self.tls
-            .extract_secrets(&format!("{}__{}", prefix, "TLS"), secrets);
-    }
-}
-
-impl SecretExtractor for SqlxConfig {
-    fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
-        extract_sensitive_url(&mut self.url, prefix, "URL", secrets);
-        if let Some(val) = self.username.take() {
-            secrets.insert(format!("{}__{}", prefix, "USERNAME"), val);
-        }
-        if let Some(val) = self.password.take() {
-            secrets.insert(format!("{}__{}", prefix, "PASSWORD"), val);
-        }
-        self.tls
-            .extract_secrets(&format!("{}__{}", prefix, "TLS"), secrets);
-    }
-}
-
-impl SecretExtractor for ClickHouseConfig {
-    fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
-        extract_sensitive_url(&mut self.url, prefix, "URL", secrets);
-        if let Some(val) = self.username.take() {
-            secrets.insert(format!("{}__{}", prefix, "USERNAME"), val);
-        }
-        if let Some(val) = self.password.take() {
-            secrets.insert(format!("{}__{}", prefix, "PASSWORD"), val);
-        }
-        if let Some(val) = self.checkpoint_store.take() {
-            secrets.insert(format!("{}__{}", prefix, "CHECKPOINT_STORE"), val);
-        }
-        self.tls
-            .extract_secrets(&format!("{}__{}", prefix, "TLS"), secrets);
+fn take_secret(
+    secrets: &mut HashMap<String, String>,
+    prefix: &str,
+    name: &str,
+    value: &mut Option<String>,
+) {
+    if let Some(value) = value.take() {
+        secrets.insert(format!("{prefix}__{}", name.to_ascii_uppercase()), value);
     }
 }
 
@@ -743,20 +626,41 @@ macro_rules! named_endpoint_secrets {
     ($($config:ident { $($field:ident),* })*) => {$(
         impl SecretExtractor for $config {
             fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
-                $(if let Some(value) = self.$field.take() {
-                    let key = stringify!($field).to_ascii_uppercase();
-                    secrets.insert(format!("{prefix}__{key}"), value);
-                })*
+                $(take_secret(secrets, prefix, stringify!($field), &mut self.$field);)*
             }
         }
     )*};
 }
 
+/// Broker and database configs: a `url` that may carry credentials, optional secret
+/// fields and `tls`.
+macro_rules! connection_secrets {
+    ($($config:ident { $($field:ident),* })*) => {$(
+        impl SecretExtractor for $config {
+            fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
+                extract_sensitive_url(&mut self.url, prefix, "URL", secrets);
+                $(take_secret(secrets, prefix, stringify!($field), &mut self.$field);)*
+                self.tls.extract_secrets(&format!("{prefix}__TLS"), secrets);
+            }
+        }
+    )*};
+}
+
+connection_secrets! {
+    KafkaConfig { username, password }
+    NatsConfig { username, password, token }
+    AmqpConfig { username, password }
+    MqttConfig { username, password }
+    IbmMqConfig { username, password }
+    RedisStreamsConfig { username, password }
+    SqlxConfig { username, password }
+    ClickHouseConfig { username, password, checkpoint_store }
+    PostgresCdcConfig { checkpoint_store }
+}
+
 impl SecretExtractor for ElasticsearchConfig {
     fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
-        if let Some(value) = self.api_key.take() {
-            secrets.insert(format!("{prefix}__API_KEY"), value);
-        }
+        take_secret(secrets, prefix, "API_KEY", &mut self.api_key);
         // `auth` is untyped here; the paths are those of `HttpBulkConfig`.
         for (kind, field) in [
             ("oauth2", "client_secret"),
@@ -787,9 +691,7 @@ named_endpoint_secrets! {
 
 impl SecretExtractor for OpenAiChatConfig {
     fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
-        if let Some(value) = self.api_key.take() {
-            secrets.insert(format!("{prefix}__API_KEY"), value);
-        }
+        take_secret(secrets, prefix, "API_KEY", &mut self.api_key);
         if let Some(endpoint) = &mut self.stream_to {
             endpoint.extract_secrets(&format!("{prefix}__STREAM_TO"), secrets);
         }
@@ -820,9 +722,7 @@ impl SecretExtractor for HttpBulkConfig {
                 ("SECRET_KEY", &mut aws.secret_key),
                 ("SESSION_TOKEN", &mut aws.session_token),
             ] {
-                if let Some(value) = value.take() {
-                    secrets.insert(format!("{prefix}__AUTH__AWS_SIGV4__{name}"), value);
-                }
+                take_secret(secrets, prefix, &format!("AUTH__AWS_SIGV4__{name}"), value);
             }
         }
         if let Some(read) = self.read.as_mut() {
@@ -846,17 +746,6 @@ impl SecretExtractor for HttpBulkConfig {
     }
 }
 
-impl SecretExtractor for PostgresCdcConfig {
-    fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
-        extract_sensitive_url(&mut self.url, prefix, "URL", secrets);
-        if let Some(val) = self.checkpoint_store.take() {
-            secrets.insert(format!("{}__{}", prefix, "CHECKPOINT_STORE"), val);
-        }
-        self.tls
-            .extract_secrets(&format!("{}__{}", prefix, "TLS"), secrets);
-    }
-}
-
 impl SecretExtractor for GrpcConfig {
     fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
         extract_sensitive_url(&mut self.url, prefix, "URL", secrets);
@@ -867,12 +756,8 @@ impl SecretExtractor for GrpcConfig {
             "BINARY_METADATA",
             secrets,
         );
-        if let Some(value) = self.bearer_token.take() {
-            secrets.insert(format!("{}__BEARER_TOKEN", prefix), value);
-        }
-        if let Some(value) = self.api_key.take() {
-            secrets.insert(format!("{}__API_KEY", prefix), value);
-        }
+        take_secret(secrets, prefix, "BEARER_TOKEN", &mut self.bearer_token);
+        take_secret(secrets, prefix, "API_KEY", &mut self.api_key);
         self.tls
             .extract_secrets(&format!("{}__{}", prefix, "TLS"), secrets);
     }
@@ -880,19 +765,20 @@ impl SecretExtractor for GrpcConfig {
 
 impl SecretExtractor for TlsConfig {
     fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
-        if let Some(val) = self.cert_password.take() {
-            secrets.insert(format!("{}__{}", prefix, "CERT_PASSWORD"), val);
-        }
+        take_secret(secrets, prefix, "CERT_PASSWORD", &mut self.cert_password);
     }
 }
 
 impl SecretExtractor for IbmTlsConfig {
     fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
-        if let Some(val) = self.key_repository_password.take() {
-            // Wire/env name matches the serde rename (`cert_password`), so the config
-            // crate's env override resolves back to this field.
-            secrets.insert(format!("{}__{}", prefix, "CERT_PASSWORD"), val);
-        }
+        // Wire/env name matches the serde rename (`cert_password`), so the config
+        // crate's env override resolves back to this field.
+        take_secret(
+            secrets,
+            prefix,
+            "CERT_PASSWORD",
+            &mut self.key_repository_password,
+        );
     }
 }
 

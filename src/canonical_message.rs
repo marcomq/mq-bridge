@@ -375,17 +375,20 @@ where
     u128_from_json(&val).map_err(serde::de::Error::custom)
 }
 
+/// Reads a message id written as a UUID, as `0x`-prefixed hex or as a decimal number.
+pub(crate) fn parse_message_id(s: &str) -> Option<u128> {
+    if let Ok(uuid) = Uuid::parse_str(s) {
+        Some(uuid.as_u128())
+    } else if s.starts_with("0x") || s.starts_with("0X") {
+        u128::from_str_radix(s.trim_start_matches("0x").trim_start_matches("0X"), 16).ok()
+    } else {
+        s.parse().ok()
+    }
+}
+
 pub(crate) fn u128_from_json(val: &serde_json::Value) -> Result<u128, String> {
     if let Some(s) = val.as_str() {
-        if let Ok(uuid) = Uuid::parse_str(s) {
-            return Ok(uuid.as_u128());
-        } else if s.starts_with("0x") || s.starts_with("0X") {
-            if let Ok(n) =
-                u128::from_str_radix(s.trim_start_matches("0x").trim_start_matches("0X"), 16)
-            {
-                return Ok(n);
-            }
-        } else if let Ok(n) = s.parse::<u128>() {
+        if let Some(n) = parse_message_id(s) {
             return Ok(n);
         }
     } else if let Some(n) = val.as_u64() {
