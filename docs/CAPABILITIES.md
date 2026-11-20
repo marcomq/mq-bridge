@@ -190,7 +190,7 @@ ends when its source is empty if the route has `exit_on_empty`, so there is no c
 | `response` | – |  |
 | `sequence` | – |  |
 | `sled` | – |  |
-| `sqlx` | `tls` block | TLS can also be set in the URL (`sslmode=`, `ssl-mode=`). On MySQL an `ssl-mode` in the URL wins over the `tls` block. |
+| `sqlx` | `tls` block | TLS can also be set in the URL (`sslmode=`, `ssl-mode=`). On MySQL an `ssl-mode` in the URL wins over the `tls` block only when it enforces TLS (`REQUIRED` or stricter). |
 | `static` | – |  |
 | `stream_buffer` | – |  |
 | `switch` | – |  |

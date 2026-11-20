@@ -129,10 +129,9 @@ fn build_sqlx_url_with_tls(config: &SqlxConfig) -> anyhow::Result<String> {
                 // It's generally better to use a client-side configuration file (`my.cnf`)
                 // for complex TLS setups. We'll add what we can.
                 warn!("For complex MySQL/MariaDB TLS setups, using a client configuration file (my.cnf) is recommended over URL parameters.");
-                // The driver takes the last `ssl-mode`, so one in the URL is left to win.
-                let url_sets_mode = url
-                    .query_pairs()
-                    .any(|(key, _)| key == "ssl-mode" || key == "sslmode");
+                // The driver takes the last `ssl-mode`: a URL mode that enforces TLS is left
+                // to win, a weaker one is overridden by the mode `tls` requires.
+                let url_sets_mode = url_enforces_tls(&url);
                 let mut query_pairs = url.query_pairs_mut();
                 if url_sets_mode {
                 } else if config.tls.accept_invalid_certs {

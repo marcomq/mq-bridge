@@ -2560,6 +2560,10 @@ fn mysql_with_a_ca_file_checks_the_host_name_unless_the_url_says_otherwise() {
     };
     assert_eq!(modes("mysql://db/app"), ["VERIFY_IDENTITY"]);
     assert_eq!(modes("mysql://db/app?ssl-mode=VERIFY_CA"), ["VERIFY_CA"]);
+    assert_eq!(
+        modes("mysql://db/app?ssl-mode=PREFERRED"),
+        ["PREFERRED", "VERIFY_IDENTITY"]
+    );
 }
 
 #[test]
