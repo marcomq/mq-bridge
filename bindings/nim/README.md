@@ -25,9 +25,10 @@ cd mq-bridge/bindings/nim && nimble install
 x86_64 and arm64, macOS arm64 and Windows x86_64; it needs `curl` and `tar`. In a
 checkout without installing, `nimble getlib` does the same download, and replaces a
 library it downloaded for an older release. To skip it, set `MQB_SKIP_LIB_DOWNLOAD=1`.
-A library you copied into `src/lib/` yourself is kept, unless it replaced a downloaded
-one: a later `nimble install` or `nimble getlib` then overwrites it, unless you delete
-its `.version` file next to it or set `MQB_SKIP_LIB_DOWNLOAD=1`.
+A library you copied into `src/lib/` yourself is kept while no `.version` file sits next
+to it or that file names the package's version. If it replaced a downloaded library whose
+`.version` names another release, a later `nimble install` or `nimble getlib` overwrites
+it, unless you delete that `.version` file or set `MQB_SKIP_LIB_DOWNLOAD=1`.
 
 To build the library yourself instead, e.g. with fewer endpoints, run from the
 repository root:

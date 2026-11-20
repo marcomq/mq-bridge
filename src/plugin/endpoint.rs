@@ -19,7 +19,7 @@
 //! is dropped without being committed is released without acknowledging
 //! anything, so the broker can redeliver. A batch whose receive was cancelled
 //! before the caller saw it is nacked, so it comes back without waiting out the
-//! broker's lease.
+//! broker's lease, unless its consumer commits in order.
 
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
@@ -232,7 +232,7 @@ impl CustomEndpointFactory for PluginEndpointFactory {
 /// Committing consumes the handle; dropping an uncommitted batch releases it
 /// without acknowledging, leaving redelivery to the broker. A batch whose receive
 /// was cancelled before it reached the caller is nacked instead, so it comes back
-/// at once rather than after the broker's lease.
+/// at once rather than after the broker's lease, unless its consumer commits in order.
 pub(crate) struct PluginBatch {
     plugin: Arc<LoadedPlugin>,
     handle: MqbBatchHandle,
@@ -399,7 +399,7 @@ impl completion::Slots for ReceiveSlots {
             drop(PluginBatch {
                 plugin: Arc::clone(plugin),
                 handle: self.batch,
-                unseen: self.len,
+                unseen: self.consumer.nackable(self.len),
             });
         }
         let _ = plugin.take_error(self.err);
@@ -510,6 +510,18 @@ impl ConsumerHandle {
             return None;
         }
         self.plugin.table().async_hooks()
+    }
+
+    /// How many messages of an abandoned batch to nack. A consumer that commits in
+    /// order gets none: a nack out of turn could settle ahead of batches the route
+    /// still commits, so its batch is only released and the broker redelivers it.
+    fn nackable(&self, len: usize) -> usize {
+        let ordered = unsafe { (self.plugin.table().consumer_commit_requires_order)(self.handle) };
+        if ordered != 0 {
+            0
+        } else {
+            len
+        }
     }
 
     /// Calls `consumer_close` once; later calls are no-ops.
@@ -702,7 +714,7 @@ async fn receive_blocking(
         }
         let messages = unsafe { super::message::from_abi(messages, len) };
         // Nacked if the caller stopped waiting before the result reaches it.
-        guard.unseen = len;
+        guard.unseen = consumer.nackable(len);
         Ok(AssertSend((guard, messages)))
     })
     .await
@@ -1440,7 +1452,9 @@ mod tests {
 
         static SETTLED: Mutex<Vec<MessageDisposition>> = Mutex::new(Vec::new());
 
-        struct SlowSource;
+        struct SlowSource {
+            ordered: bool,
+        }
 
         #[async_trait]
         impl MessageConsumer for SlowSource {
@@ -1458,6 +1472,10 @@ mod tests {
                 })
             }
 
+            fn commit_requires_order(&self) -> bool {
+                self.ordered
+            }
+
             fn as_any(&self) -> &dyn Any {
                 self
             }
@@ -1471,9 +1489,10 @@ mod tests {
             async fn create_consumer(
                 &self,
                 _: &str,
-                _: &serde_json::Value,
+                config: &serde_json::Value,
             ) -> anyhow::Result<Box<dyn MessageConsumer>> {
-                Ok(Box::new(SlowSource))
+                let ordered = config["ordered"].as_bool().unwrap_or(false);
+                Ok(Box::new(SlowSource { ordered }))
             }
         }
 
@@ -1483,17 +1502,33 @@ mod tests {
             CAPABILITIES_INPUT_ONLY,
         );
 
-        /// A batch nobody saw goes back at once; one the route held and dropped stays
-        /// unacknowledged, as after a crash.
-        #[tokio::test(flavor = "multi_thread")]
-        async fn a_batch_received_after_its_caller_left_is_nacked() {
-            unsafe { crate::plugin::register_plugin_table(TABLE.as_ptr()) }.unwrap();
-            let factory = crate::extensions::get_endpoint_factory("abandoned-source").unwrap();
-            let mut consumer = factory
-                .create_consumer("r", &serde_json::json!({}))
-                .await
-                .unwrap();
+        /// The same plugin as `TABLE`, presented as ABI 1.1 so receives take the blocking path.
+        fn blocking_consumer() -> Box<dyn MessageConsumer> {
+            let mut table = unsafe { std::ptr::read(TABLE.as_ptr()) };
+            table.struct_size = crate::support::plugin_abi::MQB_VTABLE_SIZE_V1_1;
+            let table: &'static _ = Box::leak(Box::new(table));
+            let mut factory = crate::support::plugin_abi::MqbFactoryHandle::NULL;
+            let mut handle = MqbConsumerHandle::NULL;
+            let mut err = MqbBuffer::EMPTY;
+            let config = r#"{"ordered":false}"#;
+            unsafe {
+                assert_eq!((table.factory_create)(&mut factory, &mut err), MQB_OK);
+                let status = (table.consumer_create)(
+                    factory,
+                    MqbSlice::from_str("r"),
+                    MqbSlice::from_str(config),
+                    &mut handle,
+                    &mut err,
+                );
+                assert_eq!(status, MQB_OK);
+                lent_consumer(table, handle)
+            }
+        }
 
+        async fn settled_after_abandoning(
+            mut consumer: Box<dyn MessageConsumer>,
+        ) -> Vec<MessageDisposition> {
+            SETTLED.lock().unwrap().clear();
             drop(consumer.receive_batch(1).await.unwrap());
             tokio::time::sleep(Duration::from_millis(100)).await;
             assert!(SETTLED.lock().unwrap().is_empty());
@@ -1501,14 +1536,38 @@ mod tests {
             let cancelled =
                 tokio::time::timeout(Duration::from_millis(5), consumer.receive_batch(1)).await;
             assert!(cancelled.is_err());
-            let deadline = Instant::now() + Duration::from_secs(2);
+            let deadline = Instant::now() + Duration::from_millis(500);
             while SETTLED.lock().unwrap().is_empty() && Instant::now() < deadline {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            assert!(matches!(
-                SETTLED.lock().unwrap().as_slice(),
-                [MessageDisposition::Nack]
-            ));
+            std::mem::take(&mut *SETTLED.lock().unwrap())
+        }
+
+        /// A batch nobody saw goes back at once, on the 1.2 and the blocking path alike;
+        /// one the route held and dropped stays unacknowledged, as after a crash. A
+        /// consumer that commits in order is never nacked out of turn.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_batch_received_after_its_caller_left_is_nacked() {
+            unsafe { crate::plugin::register_plugin_table(TABLE.as_ptr()) }.unwrap();
+            let factory = crate::extensions::get_endpoint_factory("abandoned-source").unwrap();
+            let consumer = |ordered: bool| {
+                let factory = Arc::clone(&factory);
+                async move {
+                    factory
+                        .create_consumer("r", &serde_json::json!({ "ordered": ordered }))
+                        .await
+                        .unwrap()
+                }
+            };
+
+            let settled = settled_after_abandoning(consumer(false).await).await;
+            assert!(matches!(settled.as_slice(), [MessageDisposition::Nack]));
+
+            let settled = settled_after_abandoning(blocking_consumer()).await;
+            assert!(matches!(settled.as_slice(), [MessageDisposition::Nack]));
+
+            let settled = settled_after_abandoning(consumer(true).await).await;
+            assert!(settled.is_empty());
         }
     }
 
