@@ -26,7 +26,8 @@ x86_64 and arm64, macOS arm64 and Windows x86_64; it needs `curl` and `tar`. In 
 checkout without installing, `nimble getlib` does the same download, and replaces a
 library it downloaded for an older release. To skip it, set `MQB_SKIP_LIB_DOWNLOAD=1`.
 A library you copied into `src/lib/` yourself is kept, unless it replaced a downloaded
-one: then delete its `.version` file next to it, or a later download overwrites it.
+one: a later `nimble install` or `nimble getlib` then overwrites it, unless you delete
+its `.version` file next to it or set `MQB_SKIP_LIB_DOWNLOAD=1`.
 
 To build the library yourself instead, e.g. with fewer endpoints, run from the
 repository root:

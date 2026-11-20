@@ -81,7 +81,8 @@ impl Contract {
 }
 
 /// The payload as sent. A change-capture source carries it as the `payload` column of a row,
-/// so any JSON object with a `payload` string is read that way; contract payloads are never JSON.
+/// so any JSON object with a `payload` string, or one under `value` as a Kafka record envelope
+/// has it, is read that way; contract payloads are never JSON.
 fn text(message: &CanonicalMessage) -> String {
     use base64::Engine;
     let raw = message.get_payload_str();
@@ -89,7 +90,10 @@ fn text(message: &CanonicalMessage) -> String {
         .starts_with('{')
         .then(|| serde_json::from_str(&raw).ok())
         .flatten();
-    match row.as_ref().and_then(|row| row["payload"].as_str()) {
+    let encoded = row
+        .as_ref()
+        .and_then(|row| row["payload"].as_str().or(row["value"]["payload"].as_str()));
+    match encoded {
         Some(encoded) => base64::engine::general_purpose::STANDARD
             .decode(encoded)
             .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
@@ -271,8 +275,21 @@ impl Source {
     }
 }
 
+/// Set for an output that takes only JSON: payloads go out in the row form [`text`] reads.
+static JSON_PAYLOADS: OnceLock<()> = OnceLock::new();
+
+fn wire(mut message: CanonicalMessage) -> CanonicalMessage {
+    use base64::Engine;
+    if JSON_PAYLOADS.get().is_some() {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&message.payload);
+        message.set_payload_str(json!({ "payload": encoded }).to_string());
+    }
+    message
+}
+
 /// Publishes `messages` and fails the step if the publisher refused any of them.
 async fn publish(publisher: &dyn MessagePublisher, messages: Vec<CanonicalMessage>) {
+    let messages = messages.into_iter().map(wire).collect();
     if let SentBatch::Partial { failed, .. } =
         publisher.send_batch(messages).await.expect("publish")
     {
@@ -291,7 +308,7 @@ async fn send_in_order(publisher: &dyn MessagePublisher, payloads: &[String], ru
     for payload in payloads {
         let message = CanonicalMessage::new(payload.clone().into_bytes(), None)
             .with_metadata_kv("contract_key", format!("{run:x}"));
-        publisher.send(message).await.expect("publish");
+        publisher.send(wire(message)).await.expect("publish");
     }
 }
 
@@ -948,6 +965,43 @@ async fn test_postgres_contract() {
                 .expect("expire locks");
         })
     });
+    check(contract).await;
+}
+
+/// A plugin endpoint. `MQB_TEST_PLUGIN` lists the libraries like `PATH`, `MQB_TEST_CONTRACT` a JSON object with
+/// `name`, `compose` (file under `docker-compose/`, or empty), `input`, `output` and optionally
+/// `stable_id`, `hop_keeps_id`, `keeps_metadata`, `ordered` set to `false`, and `json: true`.
+#[cfg(feature = "plugin")]
+#[tokio::test]
+#[ignore = "requires MQB_TEST_PLUGIN and MQB_TEST_CONTRACT"]
+async fn test_plugin_contract() {
+    let (Ok(library), Ok(spec)) = (
+        std::env::var("MQB_TEST_PLUGIN"),
+        std::env::var("MQB_TEST_CONTRACT"),
+    ) else {
+        println!("MQB_TEST_PLUGIN or MQB_TEST_CONTRACT unset, skipped");
+        return;
+    };
+    for path in std::env::split_paths(&library) {
+        let plugins = mq_bridge::plugin::load_endpoint_plugins(&path).expect("load plugin");
+        let names: Vec<_> = plugins.iter().map(|plugin| &plugin.name).collect();
+        println!("loaded {}: {names:?}", path.display());
+    }
+    let spec: serde_json::Value = serde_json::from_str(&spec).expect("MQB_TEST_CONTRACT json");
+    let name: &'static str = Box::leak(spec["name"].as_str().expect("name").into());
+    let compose = match spec["compose"].as_str().unwrap_or_default() {
+        "" => "",
+        file => self::compose(file),
+    };
+    let mut contract = Contract::new(name, compose, spec["input"].clone(), spec["output"].clone());
+    let flag = |key: &str| spec[key].as_bool().unwrap_or(true);
+    contract.stable_id = flag("stable_id");
+    contract.hop_keeps_id = flag("hop_keeps_id");
+    contract.keeps_metadata = flag("keeps_metadata");
+    contract.ordered = flag("ordered");
+    if spec["json"].as_bool() == Some(true) {
+        JSON_PAYLOADS.set(()).ok();
+    }
     check(contract).await;
 }
 

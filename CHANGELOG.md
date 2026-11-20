@@ -6,6 +6,11 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Fixed
 
+- **Plugin sources: a receive cancelled mid-call nacks its batch.** A batch the plugin
+  delivered after the caller stopped waiting (a `buffer` deadline, a route stopping) was
+  released unacknowledged, so its messages stayed leased until the broker's timeout
+  (NATS `ack_wait`: 30 s), and repeated cancellations could hold them indefinitely. Such
+  a batch is now nacked and comes back at once.
 - **`http`: a decimal `message-id` header is read as decimal.** `42` became 66 because
   unprefixed hex was tried first. IDs are now read as on `websocket` and `grpc` (UUID,
   `0x` hex, decimal), with unprefixed hex as the last fallback, so `ff` still reads as 255.

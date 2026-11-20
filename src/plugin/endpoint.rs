@@ -17,7 +17,9 @@
 //! a batch handle wrapped in [`PluginBatch`], and the plugin only learns the
 //! dispositions when the route invokes the batch commit function. A batch that
 //! is dropped without being committed is released without acknowledging
-//! anything, so the broker can redeliver.
+//! anything, so the broker can redeliver. A batch whose receive was cancelled
+//! before the caller saw it is nacked, so it comes back without waiting out the
+//! broker's lease.
 
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
@@ -228,10 +230,14 @@ impl CustomEndpointFactory for PluginEndpointFactory {
 /// One received batch, still owned by the plugin.
 ///
 /// Committing consumes the handle; dropping an uncommitted batch releases it
-/// without acknowledging, leaving redelivery to the broker.
+/// without acknowledging, leaving redelivery to the broker. A batch whose receive
+/// was cancelled before it reached the caller is nacked instead, so it comes back
+/// at once rather than after the broker's lease.
 pub(crate) struct PluginBatch {
     plugin: Arc<LoadedPlugin>,
     handle: MqbBatchHandle,
+    /// Messages not yet handed to the caller; nacked on drop.
+    unseen: usize,
 }
 
 unsafe impl Send for PluginBatch {}
@@ -389,8 +395,12 @@ impl completion::Slots for ReceiveSlots {
     fn abandon(self) {
         let plugin = &self.consumer.plugin;
         if !self.batch.is_null() {
-            // Released unacknowledged, as a dropped `PluginBatch` would be.
-            unsafe { (plugin.table().batch_free)(self.batch) };
+            // Already on the blocking pool, so the nack runs here and now.
+            drop(PluginBatch {
+                plugin: Arc::clone(plugin),
+                handle: self.batch,
+                unseen: self.len,
+            });
         }
         let _ = plugin.take_error(self.err);
     }
@@ -435,13 +445,29 @@ impl Drop for PluginBatch {
         }
         let plugin = Arc::clone(&self.plugin);
         let handle = AssertSend(handle);
+        let unseen = self.unseen;
         // `batch_free` is a blocking ABI call like any other, so keep it off the
         // executor when a drop happens inside async code.
         blocking_cleanup(move || {
             // Bind the wrapper itself: capturing only its field would move a
             // bare, non-`Send` handle into the task.
             let handle = handle;
-            unsafe { (plugin.table().batch_free)(handle.0) };
+            if unseen == 0 {
+                unsafe { (plugin.table().batch_free)(handle.0) };
+                return;
+            }
+            let codes = vec![MQB_DISPOSITION_NACK; unseen];
+            let mut err = MqbBuffer::EMPTY;
+            let status = unsafe {
+                (plugin.table().batch_commit)(handle.0, codes.as_ptr(), unseen, &mut err)
+            };
+            if status != MQB_OK {
+                tracing::warn!(
+                    plugin = %plugin.name(),
+                    error = %plugin.take_error(err),
+                    "could not nack a batch whose receive was cancelled; the broker redelivers it after its lease"
+                );
+            }
         });
     }
 }
@@ -666,22 +692,27 @@ async fn receive_blocking(
             )
         };
         // Take ownership even when the plugin wrote a handle before failing.
-        let guard = PluginBatch {
+        let mut guard = PluginBatch {
             plugin: Arc::clone(&plugin),
             handle: batch,
+            unseen: 0,
         };
         if status != MQB_OK {
             return Err(consumer_error(&plugin, status, err, "receive a batch"));
         }
         let messages = unsafe { super::message::from_abi(messages, len) };
+        // Nacked if the caller stopped waiting before the result reaches it.
+        guard.unseen = len;
         Ok(AssertSend((guard, messages)))
     })
     .await
     .map_err(|err| ConsumerError::Connection(join_error(err)))??;
-    Ok(received.0)
+    let (mut guard, messages) = received.0;
+    guard.unseen = 0;
+    Ok((guard, messages))
 }
 
-/// The 1.2 receive. Dropping it mid-call releases the batch unacknowledged.
+/// The 1.2 receive. Dropping it mid-call nacks whatever the plugin delivers.
 /// `None` means the plugin has no non-blocking receive.
 async fn receive_async(
     consumer: Arc<ConsumerHandle>,
@@ -712,6 +743,7 @@ async fn receive_async(
     let guard = PluginBatch {
         plugin: Arc::clone(plugin),
         handle: slots.batch,
+        unseen: 0,
     };
     if status == MQB_ERR_UNSUPPORTED {
         slots.consumer.blocking.store(true, Ordering::Relaxed);
@@ -1394,6 +1426,89 @@ mod tests {
             consumer.close().await.unwrap();
             assert_eq!(DISCONNECTS.load(Ordering::SeqCst), 1);
             assert_eq!(CLOSES.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[cfg(feature = "plugin-sdk")]
+    mod abandoned_receive {
+        use super::*;
+        use crate::plugin::sdk::{
+            build_vtable, ExportedVTable, NoMiddleware, CAPABILITIES_INPUT_ONLY,
+        };
+        use std::sync::Mutex;
+        use std::time::{Duration, Instant};
+
+        static SETTLED: Mutex<Vec<MessageDisposition>> = Mutex::new(Vec::new());
+
+        struct SlowSource;
+
+        #[async_trait]
+        impl MessageConsumer for SlowSource {
+            async fn receive_batch(&mut self, _: usize) -> Result<ReceivedBatch, ConsumerError> {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                let commit: BatchCommitFunc = Box::new(|dispositions| {
+                    Box::pin(async move {
+                        SETTLED.lock().unwrap().extend(dispositions);
+                        Ok(())
+                    })
+                });
+                Ok(ReceivedBatch {
+                    messages: vec![CanonicalMessage::from("held")],
+                    commit,
+                })
+            }
+
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+        }
+
+        #[derive(Debug, Default)]
+        struct SlowFactory;
+
+        #[async_trait]
+        impl CustomEndpointFactory for SlowFactory {
+            async fn create_consumer(
+                &self,
+                _: &str,
+                _: &serde_json::Value,
+            ) -> anyhow::Result<Box<dyn MessageConsumer>> {
+                Ok(Box::new(SlowSource))
+            }
+        }
+
+        static TABLE: ExportedVTable = build_vtable::<SlowFactory, NoMiddleware>(
+            "abandoned-source",
+            "0.0.0",
+            CAPABILITIES_INPUT_ONLY,
+        );
+
+        /// A batch nobody saw goes back at once; one the route held and dropped stays
+        /// unacknowledged, as after a crash.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_batch_received_after_its_caller_left_is_nacked() {
+            unsafe { crate::plugin::register_plugin_table(TABLE.as_ptr()) }.unwrap();
+            let factory = crate::extensions::get_endpoint_factory("abandoned-source").unwrap();
+            let mut consumer = factory
+                .create_consumer("r", &serde_json::json!({}))
+                .await
+                .unwrap();
+
+            drop(consumer.receive_batch(1).await.unwrap());
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert!(SETTLED.lock().unwrap().is_empty());
+
+            let cancelled =
+                tokio::time::timeout(Duration::from_millis(5), consumer.receive_batch(1)).await;
+            assert!(cancelled.is_err());
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while SETTLED.lock().unwrap().is_empty() && Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(matches!(
+                SETTLED.lock().unwrap().as_slice(),
+                [MessageDisposition::Nack]
+            ));
         }
     }
 
