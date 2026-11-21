@@ -26,20 +26,6 @@ version = 2
 unmaintained = "workspace"
 
 ignore = [
-    # --- rustls-webpki, via rumqttc 0.25 (feature: mqtt) ------------------
-    # rumqttc pulls rustls-webpki 0.102.8 into its tree but uses exactly one
-    # item from it: the `webpki::Error` variant in its error enum (tls.rs:42 is
-    # the only reference in the crate). All certificate validation on the MQTT
-    # path runs through tokio-rustls 0.26 -> rustls 0.23 -> rustls-webpki
-    # 0.103.16, which is patched for all five advisories below. Every other TLS
-    # path (aws included) also validates on 0.103.16.
-
-    { id = "RUSTSEC-2026-0104", reason = "Panic in CRL parsing. Unreachable: 0.102.8 is only used for its Error type by rumqttc, and our only WebPkiClientVerifier (src/endpoints/http.rs) runs on the patched rustls-webpki 0.103.16 and passes no CRLs." },
-    { id = "RUSTSEC-2026-0049", reason = "CRL distribution-point matching. Unreachable for the same reason as RUSTSEC-2026-0104: no CRL is ever supplied on any path in this crate." },
-    { id = "RUSTSEC-2026-0098", reason = "Name constraints for URI names incorrectly accepted. Not affected: rumqttc uses 0.102.8 only for its Error type; validation runs on patched 0.103.16." },
-    { id = "RUSTSEC-2026-0099", reason = "Name constraints accepted for wildcard-asserting certificates. Same disposition as RUSTSEC-2026-0098." },
-    { id = "RUSTSEC-2026-0382", reason = "Distrusted emSign intermediates accepted. Not affected: rumqttc uses 0.102.8 only for its Error type; all chain validation runs on patched 0.103.16, and webpki-roots / webpki-root-certs are on the patched 1.0.10." },
-
     # --- Unmaintained, no known vulnerability -----------------------------
     # `unmaintained = "workspace"` above only surfaces crates we depend on
     # directly, so the transitive fxhash / instant advisories (RUSTSEC-2025-0057,

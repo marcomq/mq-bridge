@@ -35,11 +35,11 @@ the tool output and the real exposure:
 
 | Advisory | Crate / path | Feature | Status |
 | --- | --- | --- | --- |
-| [RUSTSEC-2026-0104](https://rustsec.org/advisories/RUSTSEC-2026-0104) | `rustls-webpki 0.102.8` via `rumqttc` | `mqtt` | **Not affected** — CRL code path never invoked |
-| [RUSTSEC-2026-0049](https://rustsec.org/advisories/RUSTSEC-2026-0049) | `rustls-webpki 0.102.8` via `rumqttc` | `mqtt` | **Not affected** — CRL code path never invoked |
-| [RUSTSEC-2026-0098](https://rustsec.org/advisories/RUSTSEC-2026-0098) | `rustls-webpki 0.102.8` via `rumqttc` | `mqtt` | **Not affected** — validation runs on patched `0.103.16` |
-| [RUSTSEC-2026-0099](https://rustsec.org/advisories/RUSTSEC-2026-0099) | `rustls-webpki 0.102.8` via `rumqttc` | `mqtt` | **Not affected** — validation runs on patched `0.103.16` |
-| [RUSTSEC-2026-0382](https://rustsec.org/advisories/RUSTSEC-2026-0382) | `rustls-webpki 0.102.8` via `rumqttc` | `mqtt` | **Not affected** — validation runs on patched `0.103.16` |
+| [RUSTSEC-2026-0104](https://rustsec.org/advisories/RUSTSEC-2026-0104) | `rustls-webpki 0.102.8` via crates.io `rumqttc` | `mqtt` | **Not affected** — CRL code path never invoked |
+| [RUSTSEC-2026-0049](https://rustsec.org/advisories/RUSTSEC-2026-0049) | `rustls-webpki 0.102.8` via crates.io `rumqttc` | `mqtt` | **Not affected** — CRL code path never invoked |
+| [RUSTSEC-2026-0098](https://rustsec.org/advisories/RUSTSEC-2026-0098) | `rustls-webpki 0.102.8` via crates.io `rumqttc` | `mqtt` | **Not affected** — validation runs on patched `0.103.16` |
+| [RUSTSEC-2026-0099](https://rustsec.org/advisories/RUSTSEC-2026-0099) | `rustls-webpki 0.102.8` via crates.io `rumqttc` | `mqtt` | **Not affected** — validation runs on patched `0.103.16` |
+| [RUSTSEC-2026-0382](https://rustsec.org/advisories/RUSTSEC-2026-0382) | `rustls-webpki 0.102.8` via crates.io `rumqttc` | `mqtt` | **Not affected** — validation runs on patched `0.103.16` |
 | [RUSTSEC-2025-0057](https://rustsec.org/advisories/RUSTSEC-2025-0057) | `fxhash` via `sled 0.34` | `sled`, `dedup` | Unmaintained only, no vulnerability |
 | [RUSTSEC-2024-0384](https://rustsec.org/advisories/RUSTSEC-2024-0384) | `instant` via `sled 0.34` → `parking_lot 0.11` | `sled`, `dedup` | Unmaintained only, no vulnerability |
 | [RUSTSEC-2025-0134](https://rustsec.org/advisories/RUSTSEC-2025-0134) | `rustls-pemfile` (direct + `rumqttc`) | `amqp`, `nats`, `mqtt`, `http` | Unmaintained only, no vulnerability |
@@ -50,9 +50,12 @@ broadest — it is pulled in by `amqp`, `nats`, `mqtt`, and `http` alike.
 
 ### Detail: the `rustls-webpki` advisories
 
-The only affected version left in the tree arrives via
-`rumqttc 0.25` → `rustls-webpki 0.102.8` (feature `mqtt`). No `rumqttc` release
-moves off 0.102 yet. `rumqttc` declares this dependency but uses exactly one
+This repository's lock files contain no affected version, because
+`[patch.crates-io]` in `Cargo.toml` pins a `rumqttc` revision that uses
+`rustls-webpki 0.103`. Cargo does not apply that patch to projects that depend
+on mq-bridge from crates.io, so with feature `mqtt` they still resolve
+`rumqttc 0.25.1` → `rustls-webpki 0.102.8` and their own audit tools report
+these advisories. The published `rumqttc` declares this dependency but uses exactly one
 item from it: the `webpki::Error` variant in its own error enum (`src/tls.rs:42`
 is the only reference to `webpki` in the crate). All certificate validation on
 the MQTT path runs through `tokio-rustls 0.26` → `rustls 0.23` →
