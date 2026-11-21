@@ -2284,6 +2284,11 @@ License: Zlib OR Apache-2.0 OR MIT
 Source: https://github.com/madsmtm/objc2
 Copyright/attribution: Copyright holders/authors: objc2-quartz-core contributors
 
+objc2-system-configuration@0.3.2
+License: Zlib OR Apache-2.0 OR MIT
+Source: https://github.com/madsmtm/objc2
+Copyright/attribution: Copyright holders/authors: objc2-system-configuration contributors
+
 objc2-ui-kit@0.3.2
 License: Zlib OR Apache-2.0 OR MIT
 Source: https://github.com/madsmtm/objc2
@@ -5142,7 +5147,7 @@ freely, subject to the following restrictions:
 3. This notice may not be removed or altered from any source distribution.
 
 ----- Additional text 1aa0a3422448 -----
-Applies to: block2@0.6.2, dispatch2@0.3.1, objc2-app-kit@0.3.2, objc2-cloud-kit@0.3.2, objc2-core-data@0.3.2, objc2-core-foundation@0.3.2, objc2-core-graphics@0.3.2, objc2-core-image@0.3.2, objc2-core-location@0.3.2, objc2-core-text@0.3.2, objc2-encode@4.1.0, objc2-exception-helper@0.1.1, objc2-foundation@0.3.2, objc2-io-surface@0.3.2, objc2-quartz-core@0.3.2, objc2-ui-kit@0.3.2, objc2-user-notifications@0.3.2, objc2-web-kit@0.3.2, objc2@0.6.5
+Applies to: block2@0.6.2, dispatch2@0.3.1, objc2-app-kit@0.3.2, objc2-cloud-kit@0.3.2, objc2-core-data@0.3.2, objc2-core-foundation@0.3.2, objc2-core-graphics@0.3.2, objc2-core-image@0.3.2, objc2-core-location@0.3.2, objc2-core-text@0.3.2, objc2-encode@4.1.0, objc2-exception-helper@0.1.1, objc2-foundation@0.3.2, objc2-io-surface@0.3.2, objc2-quartz-core@0.3.2, objc2-system-configuration@0.3.2, objc2-ui-kit@0.3.2, objc2-user-notifications@0.3.2, objc2-web-kit@0.3.2, objc2@0.6.5
 
 # License
 
