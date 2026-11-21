@@ -50,10 +50,10 @@ Some examples need something besides the library:
   the `qwen3.5:2b` model (`ollama pull qwen3.5:2b`, about 2.7 GB). Set
   `LLM_URL`, `LLM_MODEL` and `OPENAI_API_KEY` for any OpenAI-compatible API.
   It sends all tickets in one request (`messages_per_request: 15`), so the long
-  policy prompt is read once; one request per ticket takes about 1.7x as long.
-  A smaller model such as `qwen2.5:0.5b` cannot answer bundles, remove that
-  line for it. Keep `reasoning_effort: none` in `options`: without it a thinking
-  model looks hung.
+  policy prompt is sent once. With Ollama's prompt cache, one request per ticket
+  can be faster. To compare, remove that line and set `concurrency: 4` on the
+  `lookup`, which then limits the requests. Keep `reasoning_effort: none` in
+  `options`: without it a thinking model looks hung.
   Remove it for an API that refuses it.
 - `connect_access_log` needs the [Connect plugin](../../../docs/book/connectors/connect.md)
   (`brew install marcomq/tap/mq-bridge-connect` or

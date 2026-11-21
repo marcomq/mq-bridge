@@ -203,6 +203,7 @@ pub mod publisher;
 pub mod response;
 pub mod route;
 pub mod shutdown;
+pub mod stream_caller;
 pub mod support;
 #[cfg(feature = "test-utils")]
 pub mod test_utils;
@@ -217,6 +218,7 @@ pub use errors::HandlerError;
 pub use models::Route;
 pub use outcomes::{Handled, Passthrough, Received, ReceivedBatch, Sent, SentBatch};
 pub use publisher::Publisher;
+pub use stream_caller::{StreamCaller, StreamCancel, StreamEnd, StreamReply, StreamToken};
 
 pub use endpoints::memory::get_or_create_channel;
 pub use publisher::{get_publisher, list_publishers, register_publisher, unregister_publisher};

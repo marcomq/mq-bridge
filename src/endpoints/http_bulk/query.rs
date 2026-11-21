@@ -20,6 +20,10 @@ use serde_json::Value;
 
 const REQUESTS: &str = "{requests}";
 const INDEX: &str = "{index}";
+/// In `envelope`: how many messages this request holds.
+pub(super) const INPUT_COUNT: &str = "{input_count}";
+/// Replaced as a whole: a JSON string cannot hold these unescaped quotes.
+const COUNT_BOUNDS: &str = r#""minItems":{input_count},"maxItems":{input_count}"#;
 const NDJSON: &str = "application/x-ndjson";
 const DEFAULT_CONCURRENCY: usize = 8;
 
@@ -30,6 +34,8 @@ pub(super) type Answer = Result<Option<Value>, Failure>;
 struct Refused {
     failure: Failure,
     narrows: bool,
+    /// One slot per message; the entries the response did hold.
+    found: Vec<Option<Answer>>,
 }
 
 pub(super) struct Query {
@@ -270,7 +276,7 @@ impl Query {
         indices: &[usize],
         requests: &[CanonicalMessage],
     ) -> Result<Vec<Answer>, Failure> {
-        self.close(&mut body);
+        self.close(&mut body, indices.len());
         match self.matched(connection, body, indices.len()).await {
             Ok(answers) => Ok(answers),
             Err(refused) if self.split_on_reject && refused.narrows => {
@@ -279,56 +285,78 @@ impl Query {
                     reason = %refused.failure.text,
                     "http_bulk query: asking again with fewer messages per request"
                 );
-                Ok(self
-                    .halves(connection, indices, requests, refused.failure)
-                    .await)
+                Ok(self.halves(connection, indices, requests, refused).await)
             }
             Err(refused) => Err(refused.failure),
         }
     }
 
-    /// Asks again in halves until the messages that cannot be answered stand alone.
+    /// Keeps what a refused response did answer and asks again for the rest, in halves
+    /// when nothing came back, until the messages that cannot be answered stand alone.
     async fn halves(
         &self,
         connection: &Connection,
         indices: &[usize],
         requests: &[CanonicalMessage],
-        failure: Failure,
+        refused: Refused,
     ) -> Vec<Answer> {
-        if indices.len() == 1 {
-            return vec![Err(failure)];
-        }
         let mut answers: Vec<Answer> = indices.iter().map(|_| Ok(None)).collect();
-        let middle = indices.len() / 2;
-        let mut pending = vec![middle..indices.len(), 0..middle];
-        while let Some(range) = pending.pop() {
+        let mut pending = Vec::new();
+        Self::narrow(
+            (0..indices.len()).collect(),
+            refused,
+            &mut answers,
+            &mut pending,
+        );
+        while let Some(places) = pending.pop() {
             let mut body = Vec::new();
-            for (place, index) in indices[range.clone()].iter().enumerate() {
+            for (number, place) in places.iter().enumerate() {
                 // The same messages were rendered for the request that is split.
-                if let Ok(part) = self.part(&requests[*index], place + 1) {
+                if let Ok(part) = self.part(&requests[indices[*place]], number + 1) {
                     self.append(&mut body, &part);
                 }
             }
-            self.close(&mut body);
-            match self.matched(connection, body, range.len()).await {
+            self.close(&mut body, places.len());
+            match self.matched(connection, body, places.len()).await {
                 Ok(found) => {
-                    for (slot, answer) in answers[range].iter_mut().zip(found) {
-                        *slot = answer;
+                    for (place, answer) in places.into_iter().zip(found) {
+                        answers[place] = answer;
                     }
                 }
-                Err(refused) if refused.narrows && range.len() > 1 => {
-                    let middle = range.start + range.len() / 2;
-                    pending.push(middle..range.end);
-                    pending.push(range.start..middle);
-                }
-                Err(refused) => {
-                    for slot in &mut answers[range] {
-                        *slot = Err(refused.failure.clone());
-                    }
-                }
+                Err(refused) => Self::narrow(places, refused, &mut answers, &mut pending),
             }
         }
         answers
+    }
+
+    fn narrow(
+        places: Vec<usize>,
+        refused: Refused,
+        answers: &mut [Answer],
+        pending: &mut Vec<Vec<usize>>,
+    ) {
+        let asked = places.len();
+        let mut missing = Vec::new();
+        for (place, found) in places.into_iter().zip(refused.found) {
+            match found {
+                Some(answer) => answers[place] = answer,
+                None => missing.push(place),
+            }
+        }
+        if missing.is_empty() {
+            return;
+        }
+        if missing.len() < asked {
+            pending.push(missing);
+        } else if refused.narrows && asked > 1 {
+            let second = missing.split_off(asked / 2);
+            pending.push(second);
+            pending.push(missing);
+        } else {
+            for place in missing {
+                answers[place] = Err(refused.failure.clone());
+            }
+        }
     }
 
     /// Sends one body and matches its `count` answers to the messages.
@@ -344,25 +372,26 @@ impl Query {
             .map_err(|failure| Refused {
                 narrows: failure.refused_content(),
                 failure,
+                found: (0..count).map(|_| None).collect(),
             })?;
-        let entries = self.entries(&text, count).map_err(|failure| Refused {
-            narrows: true,
-            failure,
-        })?;
+        let entries = self.entries(&text, count)?;
         Ok(entries.iter().map(|entry| self.answer(entry)).collect())
     }
 
-    fn close(&self, body: &mut Vec<u8>) {
+    fn close(&self, body: &mut Vec<u8>, count: usize) {
         if self.format == HttpBulkFormat::JsonArray {
             body.push(b']');
-            body.extend_from_slice(self.envelope.1.as_bytes());
+            let bounds = format!(r#""minItems":{count},"maxItems":{count}"#);
+            let rest = self.envelope.1.replace(COUNT_BOUNDS, &bounds);
+            body.extend_from_slice(rest.as_bytes());
         }
     }
 
     /// The `count` answers of a response, in the order of the messages: by `index` when
     /// the entries carry one, else by position.
-    fn entries(&self, text: &str, count: usize) -> Result<Vec<Value>, Failure> {
+    fn entries(&self, text: &str, count: usize) -> Result<Vec<Value>, Refused> {
         let outer: Option<Value> = serde_json::from_str(text).ok();
+        outer.iter().for_each(log_usage);
         let mut answer = match &self.responses_text {
             Some(pointer) => outer
                 .as_ref()
@@ -370,38 +399,62 @@ impl Query {
                 .and_then(|inner| serde_json::from_str(inner).ok()),
             None => outer.clone(),
         };
-        let entries = answer
+        let mut slots = answer
             .as_mut()
             .and_then(|answer| answer.pointer_mut(&self.responses))
             .and_then(Value::as_array_mut)
-            .filter(|entries| entries.len() == count)
             .map(std::mem::take)
-            .and_then(|entries| self.ordered(entries));
-        entries.ok_or_else(|| {
-            let stop = self.stop_reason.as_ref().and_then(|pointer| {
-                let reason = outer.as_ref()?.pointer(pointer)?.as_str()?;
-                Some(format!(" (the response ended with '{reason}')"))
-            });
-            let numbered = match self.index {
-                Some(_) => format!(" numbered 1 to {count}"),
-                None => String::new(),
-            };
-            Failure::permanent(format!(
+            .and_then(|entries| self.ordered(entries, count))
+            .unwrap_or_else(|| vec![None; count]);
+        for slot in &mut slots {
+            if slot.as_ref().is_some_and(|entry| self.lacks_value(entry)) {
+                *slot = None;
+            }
+        }
+        if slots.iter().all(Option::is_some) {
+            return Ok(slots.into_iter().flatten().collect());
+        }
+        let stop = self.stop_reason.as_ref().and_then(|pointer| {
+            let reason = outer.as_ref()?.pointer(pointer)?.as_str()?;
+            Some(format!(" (the response ended with '{reason}')"))
+        });
+        let numbered = match self.index {
+            Some(_) => format!(" numbered 1 to {count}"),
+            None => String::new(),
+        };
+        Err(Refused {
+            failure: Failure::permanent(format!(
                 "{} answered no array of {count} entries{numbered} at '{}'{}: {}",
                 self.label(),
                 self.responses,
                 stop.unwrap_or_default(),
                 quoted(text)
-            ))
+            )),
+            narrows: true,
+            found: slots
+                .iter()
+                .map(|slot| slot.as_ref().map(|entry| self.answer(entry)))
+                .collect(),
         })
     }
 
-    /// The entries by their `index`; `None` when a number is missing, repeated or unknown.
-    fn ordered(&self, entries: Vec<Value>) -> Option<Vec<Value>> {
+    /// A numbered entry that can be asked for again but holds neither value nor error.
+    fn lacks_value(&self, entry: &Value) -> bool {
+        let absent = |pointer: &str| entry.pointer(pointer).is_none_or(Value::is_null);
+        self.split_on_reject
+            && self.index.is_some()
+            && self.found.is_none()
+            && self.value.as_deref().is_some_and(absent)
+            && self.error.as_deref().is_none_or(absent)
+    }
+
+    /// One slot per message, filled by `index`; without one the count must match.
+    /// `None` when a number is repeated or unknown.
+    fn ordered(&self, entries: Vec<Value>, count: usize) -> Option<Vec<Option<Value>>> {
         let Some(pointer) = &self.index else {
-            return Some(entries);
+            return (entries.len() == count).then(|| entries.into_iter().map(Some).collect());
         };
-        let mut ordered: Vec<Option<Value>> = entries.iter().map(|_| None).collect();
+        let mut ordered: Vec<Option<Value>> = vec![None; count];
         for entry in entries {
             let number = match entry.pointer(pointer)? {
                 Value::Number(number) => number.as_u64()?,
@@ -413,7 +466,7 @@ impl Query {
                 return None;
             }
         }
-        ordered.into_iter().collect()
+        Some(ordered)
     }
 
     /// One request per message, `concurrency` at a time; a refused one fails its message alone.
@@ -439,6 +492,7 @@ impl Query {
                 quoted(&text)
             ))
         })?;
+        log_usage(&answer);
         self.answer(&answer)
     }
 
@@ -515,6 +569,40 @@ impl Query {
     }
 }
 
+/// The token counts of an OpenAI-style response.
+#[derive(Debug, PartialEq)]
+struct TokenUsage {
+    prompt: u64,
+    /// Of `prompt`; `None` when the server does not report it.
+    cached: Option<u64>,
+    completion: Option<u64>,
+}
+
+fn usage(response: &Value) -> Option<TokenUsage> {
+    let usage = response.get("usage")?;
+    Some(TokenUsage {
+        prompt: usage.get("prompt_tokens")?.as_u64()?,
+        cached: usage
+            .pointer("/prompt_tokens_details/cached_tokens")
+            .and_then(Value::as_u64),
+        completion: usage.get("completion_tokens").and_then(Value::as_u64),
+    })
+}
+
+fn log_usage(response: &Value) {
+    if !tracing::enabled!(tracing::Level::DEBUG) {
+        return;
+    }
+    if let Some(usage) = usage(response) {
+        tracing::debug!(
+            prompt_tokens = usage.prompt,
+            cached_tokens = ?usage.cached,
+            completion_tokens = ?usage.completion,
+            "http_bulk query: token usage"
+        );
+    }
+}
+
 #[cfg(all(test, feature = "plugin", feature = "test-utils"))]
 mod tests {
     use crate::endpoints::http_bulk::HttpBulkPublisher;
@@ -534,6 +622,43 @@ mod tests {
         config["url"] = json!(server.url());
         let config: HttpBulkConfig = serde_json::from_value(config).expect("config");
         HttpBulkPublisher::new(&config).expect("publisher")
+    }
+
+    #[test]
+    fn usage_tells_cached_tokens_from_a_server_that_reports_none() {
+        use super::{usage, TokenUsage};
+        let full = json!({"usage": {
+            "prompt_tokens": 90,
+            "completion_tokens": 7,
+            "prompt_tokens_details": {"cached_tokens": 64}
+        }});
+        let expected = TokenUsage {
+            prompt: 90,
+            cached: Some(64),
+            completion: Some(7),
+        };
+        assert_eq!(usage(&full), Some(expected));
+        let plain = usage(&json!({"usage": {"prompt_tokens": 90}})).unwrap();
+        assert_eq!((plain.cached, plain.completion), (None, None));
+        assert_eq!(usage(&json!({"hits": []})), None);
+    }
+
+    #[tokio::test]
+    async fn a_custom_envelope_keeps_a_literal_input_count() {
+        let server = server(|_| (200, r#"[{"v":1}]"#.to_string())).await;
+        let publisher = publisher(
+            &server,
+            json!({"query": {
+                "path": "/q", "format": "json_array", "request": "{\"q\":1}",
+                "envelope": "{\"items\":{requests},\"note\":\"{input_count}\"}"
+            }}),
+        );
+        publisher
+            .send_batch(vec![CanonicalMessage::from("a")])
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&server.requests()[0].body).unwrap();
+        assert_eq!(body["note"], "{input_count}");
     }
 
     fn requests(payloads: &[&str]) -> Vec<CanonicalMessage> {

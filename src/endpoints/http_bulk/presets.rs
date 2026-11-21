@@ -6,6 +6,7 @@
 //! Named endpoints that are an `http_bulk` configuration: a few fields and a
 //! URI of their own, and the generic publisher underneath.
 
+use super::query::INPUT_COUNT;
 use super::stream_query::StreamQueryPublisher;
 use super::{HttpBulkConsumer, HttpBulkPublisher};
 use crate::errors::InvalidConfig;
@@ -617,10 +618,15 @@ fn openai_chat(_route: &str, value: &Value) -> anyhow::Result<Value> {
     with_tls(resolved, config.tls)
 }
 
+/// Holds the model to one numbered entry per input. Ollama sorts schema keys, so the
+/// answer field must sort after `n`, or the model writes it before its number.
+const ANSWERS_FORMAT: &str = r#"{"type":"json_schema","json_schema":{"name":"answers","schema":{"type":"object","properties":{"answers":{"type":"array","minItems":COUNT,"maxItems":COUNT,"items":{"type":"object","properties":{"n":{"type":"integer"},"result":{"type":"KIND"}},"required":["n","result"]}}},"required":["answers"]}}}"#;
+
 /// What a bundled request adds to the system message.
 const BUNDLED: &str = "The user message holds numbered inputs; each starts with its number and \
-    a colon. Treat every input on its own. Answer with one JSON object \
-    {\"answers\": [{\"n\": 1, \"answer\": ...}, ...]} that has exactly one entry per input; \
+    a colon. Treat every input on its own. Any answer format asked for above applies to each \
+    single answer. The whole response is one JSON object \
+    {\"answers\": [{\"n\": 1, \"result\": ...}, ...]} that has exactly one entry per input; \
     \"n\" is the number of the input.";
 
 /// The query that sends `count` messages as numbered inputs of one completion.
@@ -632,6 +638,7 @@ fn bundled_chat(
     count: usize,
 ) -> anyhow::Result<Value> {
     const REQUESTS: &str = "{requests}";
+    const FORMAT: &str = "{answers_format}";
     // The system message is sent once per request, so it has no message to read from.
     if system.is_some_and(|system| system.contains("${") || system.contains(REQUESTS)) {
         bail!("'system' cannot hold '${{…}}' or '{REQUESTS}' with 'messages_per_request'");
@@ -640,13 +647,12 @@ fn bundled_chat(
         bail!("'prompt' cannot hold '{{index}}' with 'messages_per_request'");
     }
     let entry = match json {
-        true => "Each \"answer\" is the JSON object that answers its input.",
-        false => "Each \"answer\" is a string, the answer to its input.",
+        true => "Each \"result\" is the JSON object that answers its input.",
+        false => "Each \"result\" is a string, the answer to its input.",
     };
-    let system = [system.unwrap_or_default(), BUNDLED, entry].join("\n");
-    // The answers arrive as one JSON object whatever a single answer is.
-    body.entry("response_format")
-        .or_insert_with(|| json!({"type": "json_object"}));
+    let field = answer_field(body.get("response_format"));
+    let rules = format!("{BUNDLED}\n{entry}").replace("\"result\"", &format!("\"{field}\""));
+    let system = [system.unwrap_or_default(), &rules].join("\n");
     body.insert(
         "messages".into(),
         json!([
@@ -654,20 +660,46 @@ fn bundled_chat(
             {"role": "user", "content": REQUESTS}
         ]),
     );
+    // `json_object` leaves the shape open, and a `system` that names one answer's format wins.
+    // Set after `messages`, so the count is in the part of the envelope closed last.
+    let unshaped = json!({"type": "json_object"});
+    if body
+        .get("response_format")
+        .is_none_or(|format| *format == unshaped)
+    {
+        body.remove("response_format");
+        body.insert("response_format".into(), json!(FORMAT));
+    }
     let envelope = Value::Object(body).to_string();
+    let answers_format = ANSWERS_FORMAT
+        .replace("COUNT", INPUT_COUNT)
+        .replace("KIND", if json { "object" } else { "string" });
     Ok(json!({
         "path": "/chat/completions",
         "format": "json_array",
         "request": json!({"type": "text", "text": format!("{{index}}: {prompt}")}).to_string(),
-        "envelope": envelope.replace(&format!("\"{REQUESTS}\""), REQUESTS),
+        "envelope": envelope
+            .replace(&format!("\"{REQUESTS}\""), REQUESTS)
+            .replace(&format!("\"{FORMAT}\""), &answers_format),
         "max_messages": count,
         "responses_text": "/choices/0/message/content",
         "responses": "/answers",
         "index": "/n",
-        "value": "/answer",
+        "value": format!("/{field}"),
         "stop_reason": "/choices/0/finish_reason",
         "split_on_reject": true
     }))
+}
+
+/// `answer` for a custom schema written before the bundle's field became `result`.
+fn answer_field(format: Option<&Value>) -> &'static str {
+    let entry = format.and_then(|format| {
+        format.pointer("/json_schema/schema/properties/answers/items/properties")
+    });
+    match entry {
+        Some(entry) if entry.get("answer").is_some() && entry.get("result").is_none() => "answer",
+        _ => "result",
+    }
 }
 
 #[cfg(all(test, feature = "plugin", feature = "test-utils"))]
@@ -1291,7 +1323,7 @@ mod tests {
             .iter()
             .map(|text| {
                 let (number, text) = text.split_once(": Text: ").unwrap();
-                json!({"n": number.parse::<u64>().unwrap(), "answer": text.to_uppercase()})
+                json!({"n": number.parse::<u64>().unwrap(), "result": text.to_uppercase()})
             })
             .rev()
             .collect();
@@ -1341,7 +1373,9 @@ mod tests {
         let sent = calls(&server);
         assert_eq!(sent.len(), 2);
         let body: Value = serde_json::from_str(&sent[0].2).unwrap();
-        assert_eq!(body["response_format"], json!({"type": "json_object"}));
+        let schema = &body["response_format"]["json_schema"]["schema"];
+        assert_eq!(schema["properties"]["answers"]["minItems"], 2);
+        assert_eq!(schema["properties"]["answers"]["maxItems"], 2);
         let system = body["messages"][0]["content"].as_str().unwrap();
         assert!(system.starts_with("Shout.\nThe user message holds numbered inputs"));
         assert_eq!(
@@ -1382,8 +1416,9 @@ mod tests {
     async fn openai_chat_halves_a_bundle_until_the_bad_message_stands_alone() {
         // (inputs, answers, reason of the one failure, requests sent)
         for (inputs, answered, reason, requests) in [
-            // Too few entries, a number twice, a number nobody has: nothing can be matched.
-            (vec!["a", "lost", "c", "d"], 4, None, 5),
+            // A lost entry is asked for alone; the answers that came back are kept.
+            (vec!["a", "lost", "c", "d"], 4, None, 2),
+            // A number twice or a number nobody has: nothing can be matched.
             (vec!["a", "twice", "c", "d"], 4, None, 5),
             (vec!["a", "stranger", "c", "d"], 4, None, 5),
             // Refused for its size, cut off, or declined: only that message fails.
@@ -1456,6 +1491,85 @@ mod tests {
         );
         // Neither halves nor the bundle after it.
         assert_eq!(calls(&server).len(), 1);
+    }
+
+    fn chat_answer(answers: Vec<Value>) -> (u16, String) {
+        let content = json!({"answers": answers}).to_string();
+        let choice = json!({"message": {"content": content}, "finish_reason": "stop"});
+        (200, json!({"choices": [choice]}).to_string())
+    }
+
+    fn inputs(request: &crate::plugin::test_support::StubRequest) -> usize {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        body["messages"][1]["content"].as_array().unwrap().len()
+    }
+
+    #[tokio::test]
+    async fn openai_chat_reads_the_answer_field_of_a_custom_schema() {
+        let server = StubHttpServer::start(|request| {
+            let answers = (1..=inputs(request))
+                .map(|n| json!({"n": n, "answer": format!("a{n}")}))
+                .collect();
+            chat_answer(answers)
+        })
+        .await
+        .expect("stub server");
+        let entry = json!({"type": "object", "required": ["n", "answer"], "properties": {
+            "n": {"type": "integer"}, "answer": {"type": "string"}
+        }});
+        let schema = json!({"type": "object", "properties": {
+            "answers": {"type": "array", "items": entry}
+        }});
+        let config = json!({
+            "url": server.url(), "model": "m", "prompt": "Text: ${payload:body}",
+            "messages_per_request": 2, "concurrency": 1,
+            "options": {"response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "custom", "schema": schema}
+            }}
+        });
+        let publisher = preset("openai_chat")
+            .create_publisher("route", &config)
+            .await
+            .unwrap();
+        let answers = publisher.lookup_batch(&rows(&["x", "y"])).await;
+        assert_eq!(
+            answers.unwrap().unwrap(),
+            vec![Some(json!("a1")), Some(json!("a2"))]
+        );
+        let body: Value = serde_json::from_str(&calls(&server)[0].2).unwrap();
+        let system = body["messages"][0]["content"].as_str().unwrap();
+        assert!(system.contains("\"answer\": ..."), "{system}");
+    }
+
+    #[tokio::test]
+    async fn openai_chat_asks_again_for_an_entry_without_its_value() {
+        let server = StubHttpServer::start(|request| {
+            let count = inputs(request);
+            let answers = (1..=count)
+                .map(|n| match count > 1 && n == 2 {
+                    true => json!({"n": n}),
+                    false => json!({"n": n, "result": "ok"}),
+                })
+                .collect();
+            chat_answer(answers)
+        })
+        .await
+        .expect("stub server");
+        let config = json!({
+            "url": server.url(), "model": "m", "prompt": "Text: ${payload:body}",
+            "messages_per_request": 2, "concurrency": 1
+        });
+        let publisher = preset("openai_chat")
+            .create_publisher("route", &config)
+            .await
+            .unwrap();
+        let answers = publisher.lookup_batch(&rows(&["x", "y"])).await;
+        assert_eq!(
+            answers.unwrap().unwrap(),
+            vec![Some(json!("ok")), Some(json!("ok"))]
+        );
+        assert_eq!(calls(&server).len(), 2);
     }
 
     #[test]

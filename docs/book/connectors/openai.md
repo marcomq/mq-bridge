@@ -76,7 +76,29 @@ output:
 On the command line the scheme is `openai://` or `openai-chat://`, for example
 `openai://localhost:11434?model=llama3.2&prompt=…`.
 
+### Under a `lookup`
+
+A `lookup` hands the endpoint the whole batch. Which `concurrency` limits the
+requests depends on whether messages are bundled:
+
+| | Without `messages_per_request` | With `messages_per_request` |
+|---|---|---|
+| Requests | one per message | one per bundle |
+| Requests in flight | the `lookup`'s `concurrency` (default 16) | the endpoint's `concurrency` (default 8) |
+| A message that cannot be answered | fails alone | fails alone |
+
+Set the one that applies to what the server can run at once. When you compare
+both forms against a local model, keep the two values equal, or the comparison
+measures the concurrency too.
+
 ### Several messages in one request
+
+Bundling saves prompt tokens, which pays off where repeated input is billed or
+no prompt cache exists. With a cache it need not save time: fifteen tickets with
+a policy of about 460 tokens on Ollama (`qwen3.5:2b`, one local server) sent 861
+instead of 6,040 prompt tokens as one bundle, but took 50 s against 40 s as
+separate requests, with 695 instead of 494 output tokens, and 5 of the 15
+answers differed. Compare both on your own data.
 
 With `messages_per_request` the endpoint sends that many messages as numbered
 inputs of one completion and hands each message its own answer. The system
@@ -102,23 +124,29 @@ reviews_scored:
     kafka: { topic: "reviews.scored", url: "localhost:9092" }
 ```
 
-The request asks for a JSON object `{"answers": [{"n": 1, "answer": …}, …]}`
-with one entry per input. Each answer goes to the message whose number it
-carries, so the order the model answers in does not matter. With `json: true`
-each `answer` is a JSON object, otherwise a string.
+The request asks for a JSON object `{"answers": [{"n": 1, "result": …}, …]}`
+with one entry per input, and sends that shape as a `json_schema`. Each answer
+goes to the message whose number it carries, so the order the model answers in
+does not matter. With `json: true` each `result` is a JSON object, otherwise a
+string.
 On the command line it is one more parameter:
 `openai://localhost:11434?model=llama3.2&prompt=…&messages_per_request=20`.
 
 - **Answers that cannot be matched are asked again in halves.** A response
-  that is not that object, has more or fewer entries than inputs, or holds a
-  number twice or one no input has, is not used. Its messages are sent again
+  that is not that object, or holds a number twice or one no input has, is
+  not used. Its messages are sent again
   in two requests, and so on, until what cannot be answered stands alone and
   fails for good. A request the API refuses with 400, 409, 413 or 422, such
   as one over the context length, is halved the same way, so one oversized
   message does not fail its neighbours.
-- **Halving costs requests.** One bad message among 20 costs about ten
-  requests instead of one; a model that loses count at every size costs up to
-  twice as many requests as without bundling. Pick a size your model handles;
+- **`system` may name the format of one answer.** The request adds that this
+  format applies to each entry of `answers`.
+- **Missing answers are asked for again.** Entries that came back are kept, and
+  only the missing messages go into the next request.
+- **Halving costs requests.** A response that cannot be matched at all is asked
+  again in halves. One bad message among 20 costs about ten requests instead of
+  one; a model that loses count at every size costs up to twice as many requests
+  as without bundling. Pick a size your model handles;
   how many inputs a model keeps apart depends on the model and on the length
   of the texts. Each halving logs a warning with the reason.
 - **Under a `lookup`, a failed message fails alone too.** The other messages
@@ -147,15 +175,17 @@ On the command line it is one more parameter:
   from sources you do not trust with ones whose answers matter, and leave
   `messages_per_request` out where each message needs a request of its own.
 - **The inputs are sent as text parts** of one user message
-  (`content: [{"type": "text", …}]`), and the request sets
-  `response_format: json_object` unless `options` sets another, such as a
-  strict `json_schema`. OpenAI, Ollama and vLLM take both; a server that does
-  not needs the one-per-message form.
+  (`content: [{"type": "text", …}]`), and the request sets a `json_schema`
+  as `response_format`. For a server that refuses it, set another in `options`,
+  e.g. `response_format: { type: text }`; `json_object` is replaced by the
+  schema. Only Ollama was called with this schema.
 - **A plain-text payload:** use `${message:payload}`, which sends the payload
   as text, with invalid UTF-8 bytes replaced. `${payload}` and fields such as
   `${payload:text}` need a JSON payload; for plain text they render empty.
-- **No metrics per bundle.** The token `usage` of a response is not kept, and
-  an answer carries no mark of the bundle it came from.
+- **No metrics per bundle.** An answer carries no mark of the bundle it came
+  from. With `DEBUG` logging, each non-streaming response logs its
+  `prompt_tokens` and, if the server reports them, `cached_tokens` and
+  `completion_tokens`.
 
 | Field | Default | Meaning |
 |---|---|---|
@@ -164,7 +194,7 @@ On the command line it is one more parameter:
 | `model` | required | Model name |
 | `prompt` | required | Template of the user message |
 | `system` | none | Template of the system message |
-| `json` | `false` | Asks for `response_format: json_object` and parses the answer. An answer that is not JSON fails its message for good |
+| `json` | `false` | Asks for `response_format: json_object` (with `messages_per_request`, the bundle's schema) and parses the answer. An answer that is not JSON fails its message for good |
 | `options` | none | Further request fields, e.g. `temperature`, `max_tokens`, `response_format`; on Ollama `reasoning_effort: none` turns off thinking. It cannot set `model`, `messages` or `stream`. JSON text in a URI |
 | `concurrency` | 8 | Requests in flight when a batch is sent to the endpoint as an output. Under a `lookup`, the lookup's own `concurrency` (default 16) decides, unless `messages_per_request` is set |
 | `messages_per_request` | none | Messages answered by one request, see [above](#several-messages-in-one-request). Unset: one request per message |

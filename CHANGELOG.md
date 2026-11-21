@@ -14,6 +14,13 @@ All notable changes to `mq-bridge`. Newest first.
 - **Process scenarios for any endpoint.** The CLI suite runs SIGTERM, `kill -9` and broker
   restart scenarios against a plugin through `MQB_TEST_PLUGIN` and `MQB_TEST_TARGET`, and
   against another `mqb` build through `MQB_TEST_BIN`.
+- **`StreamCaller`: request/reply with a streamed answer.** It sends a request to an
+  `openai_chat` or `http_bulk` endpoint with `stream_to` and reads that request's tokens. A
+  reply always ends with one last token, a retried attempt does not end it, and dropping an
+  unfinished reply cancels the request. One caller serves parallel requests under different
+  correlation ids. `StreamToken` reads and writes the `mqb.stream.*` format.
+- **`http_bulk` queries log token usage.** At `DEBUG`, each non-streaming response with an
+  OpenAI-style `usage` logs `prompt_tokens`, `cached_tokens` and `completion_tokens`.
 
 ### Changed
 
@@ -23,7 +30,14 @@ All notable changes to `mq-bridge`. Newest first.
   a cast now fails with error `42804`; write `CAST(${payload:x} AS numeric)` there.
 
 ### Fixed
-
+- **`openai_chat`: a `system` prompt that names its own answer format no longer breaks
+  `messages_per_request`.** The model followed that format instead of the `answers` array, so
+  a bundle of 15 messages was split into 12 requests and could lose a message. A bundle now
+  sends a `json_schema` with one numbered entry per input, and each entry's field is `result`.
+  A server that refuses the schema needs another `response_format` in `options`, e.g.
+  `{ type: text }`.
+- **`openai_chat`: a bundle keeps the answers it got.** A response with missing entries used
+  to be discarded and asked again in halves. Now only the missing messages are asked again.
 - **`sled` output and `deduplication`: concurrent sends no longer hang.** Concurrent
   `flush_async` calls deadlock in sled 0.34, so a route could stop for good without an error.
   The flush now runs on a blocking thread.

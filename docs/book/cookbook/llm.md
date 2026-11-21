@@ -81,8 +81,9 @@ On the command line the endpoint is `openai://host?model=…&prompt=…`.
 
 A short classification repeats the same instructions for every message.
 `messages_per_request` sends several messages as numbered inputs of one
-completion and gives each message its own answer, so the system message is
-paid for once per request:
+completion and gives each message its own answer, so the system message is sent
+once per request. With a prompt cache, separate requests can still be faster, so
+compare both:
 
 ```yaml
 reviews_scored:
@@ -104,10 +105,13 @@ reviews_scored:
 ```
 
 Each answer carries the number of its input, so the order the model answers
-in does not matter. Answers that cannot be matched are asked again in halves,
-so a model that loses count costs more, not less. Put the task into `system`
-and only the data into `prompt`. What to expect is on the
-[connector page](../connectors/openai.md#several-messages-in-one-request).
+in does not matter. Missing answers are asked for again, and a response that
+cannot be matched is asked again in halves, so a model that loses count costs
+more, not less. Put the task into `system`
+and only the data into `prompt`. With bundles the endpoint's `concurrency`
+limits the requests in flight, without them the `lookup`'s; see
+[Under a `lookup`](../connectors/openai.md#under-a-lookup). What to expect is on
+the [connector page](../connectors/openai.md#several-messages-in-one-request).
 
 ## Embed a table into a vector store
 
@@ -204,6 +208,23 @@ Python or Node binding; a separate one uses a broker, as in the
 [connector page](../connectors/openai.md#streaming-the-answer). For the raw
 server-sent events of any other API, use the [`http`](../reference/http.md)
 output with `stream_response_to`.
+
+In Rust, `StreamCaller` sends a request to such an endpoint and reads its tokens
+without a route. The reply always ends with one last token, also when the
+request dies first:
+
+```rust,ignore
+let chat = mq_bridge::StreamCaller::new("chat", endpoint).await?;
+let mut reply = chat.start("turn-7", "Hello".into()).await?;
+while let Some(token) = reply.next().await {
+    print!("{}", token.text());
+}
+```
+
+One caller serves parallel requests under different correlation ids; clone it
+for other tasks. Two callers must not share a `stream_to` or `cancel_from`
+topic, because they would take each other's messages. `cancel_handle()` stops a
+request from another task, and dropping an unfinished reply cancels it.
 
 ## Other providers
 
