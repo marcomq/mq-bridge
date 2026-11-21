@@ -1,4 +1,6 @@
 #![allow(dead_code)] // This module contains helpers used by various integration tests.
+pub mod contract;
+
 use crate::traits::{BoxFuture, MessageDisposition, MessagePublisher, Received};
 use crate::traits::{ConsumerError, MessageConsumer, PublisherError, ReceivedBatch, SentBatch};
 use crate::{CanonicalMessage, Route};

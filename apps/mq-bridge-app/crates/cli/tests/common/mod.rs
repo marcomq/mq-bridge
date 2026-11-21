@@ -8,10 +8,16 @@ use std::process::{Command, Output};
 // ---------------------------------------------------------------- CLI driving
 
 /// The binary under test; `MQB_TEST_BIN` points the suite at another build, such as an
-/// older release.
+/// older release. `MQB_TEST_PLUGIN` lists plugin libraries to load, separated like `PATH`.
 pub fn cli() -> Command {
     let built = || env!("CARGO_BIN_EXE_mq-bridge-app").into();
-    Command::new(std::env::var_os("MQB_TEST_BIN").unwrap_or_else(built))
+    let mut command = Command::new(std::env::var_os("MQB_TEST_BIN").unwrap_or_else(built));
+    if let Some(plugins) = std::env::var_os("MQB_TEST_PLUGIN") {
+        for plugin in std::env::split_paths(&plugins) {
+            command.arg("--plugin").arg(plugin);
+        }
+    }
+    command
 }
 
 pub fn copy_with_options(from: &str, to: &str, options: &[&str]) -> Output {

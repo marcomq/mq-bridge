@@ -20,16 +20,27 @@ RUST_LOG=info,mq_bridge=trace cargo test ...
 
 ## Delivery contract
 
-`tests/integration/contract.rs` runs the source rows of [DELIVERY.md](../docs/DELIVERY.md) against
-real brokers: a nacked message comes back, a message held by a consumer that died comes back,
-and `message_id` is the same on the second delivery where the table says so. Each broker is one
-`test_<broker>_contract` calling `check(Contract { name, compose, input, output, stable_id,
-hop_keeps_id })`; a new broker endpoint adds one, so the table and the behaviour cannot drift
-apart. Run them with:
+`mq_bridge::test_utils::contract` holds the check catalog, and plugins run the same code.
+`tests/integration/contract.rs` applies it to the source rows of
+[DELIVERY.md](../docs/DELIVERY.md) on real brokers. Each broker is one `test_<broker>_contract`
+calling `check(compose, Contract::new(..))`, so the table and the behaviour cannot drift apart.
+
+`scripts/contract.sh` runs one broker at a time and removes its containers afterwards:
 
 ```bash
-cargo test --test integration_test --features full,test-utils --release -- --ignored --nocapture --test-threads=1 integration::contract::
+scripts/contract.sh                       # every broker
+scripts/contract.sh nats kafka            # only these
+scripts/contract.sh --prune-images kafka  # also delete the images this run downloaded
 ```
+
+The checks test themselves without Docker, using a broker with injected faults:
+
+```bash
+cargo test --lib --features full,test-utils test_utils::contract
+```
+
+Testing a plugin, including the process scenarios, is described in
+[Custom endpoints](../docs/book/extending/custom-endpoints.md).
 
 ## Ignored test inventory
 

@@ -2,6 +2,26 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
+## 1.7.0
+
+### Added
+
+- **Delivery contract for built-in and plugin endpoints.** `mq_bridge::test_utils::contract`
+  (feature `test-utils`) runs one check catalog against any endpoint and reports every check
+  as passed, failed or skipped. It adds parallel sends with rejects, reconnects, batch sizes,
+  writes before a consumer exists, repeated open and close, payload fidelity, a large backlog
+  and sink-only targets. `scripts/contract.sh` runs it per broker and removes the containers.
+- **Process scenarios for any endpoint.** The CLI suite runs SIGTERM, `kill -9` and broker
+  restart scenarios against a plugin through `MQB_TEST_PLUGIN` and `MQB_TEST_TARGET`, and
+  against another `mqb` build through `MQB_TEST_BIN`.
+
+### Changed
+
+- **`sqlx`: a `${payload:x}` integer above the `BIGINT` range keeps every digit.** It was
+  bound as a float and silently rounded. It now binds as text, as `columns: auto` already
+  does. A query writing such a value into a PostgreSQL `float8` or `numeric` column without
+  a cast now fails with error `42804`; write `CAST(${payload:x} AS numeric)` there.
+
 ## 1.6.2
 
 ### Fixed

@@ -320,16 +320,9 @@ pub(super) fn resolve_source(
             Some(serde_json::Value::Number(n)) => {
                 if let Some(i) = n.as_i64() {
                     BindValue::Int(i)
+                } else if n.is_u64() {
+                    BindValue::Text(n.to_string())
                 } else if let Some(f) = n.as_f64() {
-                    if n.is_u64() {
-                        static WARNED: std::sync::atomic::AtomicBool =
-                            std::sync::atomic::AtomicBool::new(false);
-                        if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                            warn!(
-                                "`${{payload:{field}}}` is an integer above the BIGINT range and binds as a rounded float. Use `columns: auto` to keep it exact. Further occurrences are not logged."
-                            );
-                        }
-                    }
                     BindValue::Float(f)
                 } else {
                     BindValue::Null
@@ -412,4 +405,17 @@ pub(super) fn bind_message_sources<'q>(
         query = bind_value(query, value);
     }
     Ok(query)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn payload_integer_above_i64_binds_as_exact_text() {
+        let msg = CanonicalMessage::new(br#"{"n":18446744073709551615}"#.to_vec(), None);
+        let json = serde_json::from_slice(&msg.payload).ok();
+        let value = resolve_source(&msg, &ColumnSource::Payload("n".into()), &json);
+        assert_eq!(value, BindValue::Text("18446744073709551615".into()));
+    }
 }
