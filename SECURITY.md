@@ -37,9 +37,9 @@ the tool output and the real exposure:
 | --- | --- | --- | --- |
 | [RUSTSEC-2026-0104](https://rustsec.org/advisories/RUSTSEC-2026-0104) | `rustls-webpki 0.102.8` via crates.io `rumqttc` | `mqtt` | **Not affected** — CRL code path never invoked |
 | [RUSTSEC-2026-0049](https://rustsec.org/advisories/RUSTSEC-2026-0049) | `rustls-webpki 0.102.8` via crates.io `rumqttc` | `mqtt` | **Not affected** — CRL code path never invoked |
-| [RUSTSEC-2026-0098](https://rustsec.org/advisories/RUSTSEC-2026-0098) | `rustls-webpki 0.102.8` via crates.io `rumqttc` | `mqtt` | **Not affected** — validation runs on patched `0.103.16` |
-| [RUSTSEC-2026-0099](https://rustsec.org/advisories/RUSTSEC-2026-0099) | `rustls-webpki 0.102.8` via crates.io `rumqttc` | `mqtt` | **Not affected** — validation runs on patched `0.103.16` |
-| [RUSTSEC-2026-0382](https://rustsec.org/advisories/RUSTSEC-2026-0382) | `rustls-webpki 0.102.8` via crates.io `rumqttc` | `mqtt` | **Not affected** — validation runs on patched `0.103.16` |
+| [RUSTSEC-2026-0098](https://rustsec.org/advisories/RUSTSEC-2026-0098) | `rustls-webpki 0.102.8` via crates.io `rumqttc` | `mqtt` | **Not affected with this repository's lock file** (validation runs on `0.103.16`). crates.io consumers must resolve the `rustls-webpki` used by `rustls` to `0.103.12` or later |
+| [RUSTSEC-2026-0099](https://rustsec.org/advisories/RUSTSEC-2026-0099) | `rustls-webpki 0.102.8` via crates.io `rumqttc` | `mqtt` | **Not affected with this repository's lock file** (validation runs on `0.103.16`). crates.io consumers must resolve the `rustls-webpki` used by `rustls` to `0.103.12` or later |
+| [RUSTSEC-2026-0382](https://rustsec.org/advisories/RUSTSEC-2026-0382) | `rustls-webpki 0.102.8` via crates.io `rumqttc` | `mqtt` | **Not affected with this repository's lock file** (validation runs on `0.103.16`). crates.io consumers must resolve the `rustls-webpki` used by `rustls` to `0.103.16` or later |
 | [RUSTSEC-2025-0057](https://rustsec.org/advisories/RUSTSEC-2025-0057) | `fxhash` via `sled 0.34` | `sled`, `dedup` | Unmaintained only, no vulnerability |
 | [RUSTSEC-2024-0384](https://rustsec.org/advisories/RUSTSEC-2024-0384) | `instant` via `sled 0.34` → `parking_lot 0.11` | `sled`, `dedup` | Unmaintained only, no vulnerability |
 | [RUSTSEC-2025-0134](https://rustsec.org/advisories/RUSTSEC-2025-0134) | `rustls-pemfile` (direct + `rumqttc`) | `amqp`, `nats`, `mqtt`, `http` | Unmaintained only, no vulnerability |
@@ -59,8 +59,9 @@ these advisories. The published `rumqttc` declares this dependency but uses exac
 item from it: the `webpki::Error` variant in its own error enum (`src/tls.rs:42`
 is the only reference to `webpki` in the crate). All certificate validation on
 the MQTT path runs through `tokio-rustls 0.26` → `rustls 0.23` →
-`rustls-webpki 0.103.16`, which is patched for all five advisories.
-**Not affected.**
+`rustls-webpki 0.103.x`. This repository's lock file resolves that to `0.103.16`,
+which is patched for all five advisories. **Not affected.** Consumers use their
+own lock file, so they need `0.103.16` or later on this path to be covered too.
 
 Every other TLS path, including the AWS SDK (feature `aws`), now validates on
 `rustls 0.23` → `rustls-webpki 0.103.16`. The former legacy `rustls 0.21` →
