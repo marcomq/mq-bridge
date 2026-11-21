@@ -507,14 +507,13 @@ impl DedupStore for SledDedupStore {
         if !self.durable {
             return;
         }
-        if let Err(e) = self.db.flush_async().await {
+        if let Err(e) = crate::endpoints::sled::flush(&self.db).await {
             error!("Failed to flush the deduplication DB before the source ack: {e}");
         }
     }
 
     async fn flush(&self) -> anyhow::Result<()> {
-        self.db.flush_async().await?;
-        Ok(())
+        crate::endpoints::sled::flush(&self.db).await
     }
 }
 

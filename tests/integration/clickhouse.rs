@@ -24,7 +24,7 @@ fn base_config() -> ClickHouseConfig {
 }
 
 /// Run raw SQL against the ClickHouse HTTP interface (no bindings needed for setup/asserts).
-async fn ch_exec(sql: &str) -> String {
+pub(super) async fn ch_exec(sql: &str) -> String {
     let client = reqwest::Client::new();
     let resp = client
         .post(CH_URL)

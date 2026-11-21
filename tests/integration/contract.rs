@@ -325,6 +325,96 @@ async fn test_file_contract() {
     check("", Contract::new("file", file.clone(), file)).await;
 }
 
+/// ClickHouse as a sink: its cursor source is non-destructive, so rows are read back with SQL.
+#[cfg(feature = "clickhouse")]
+#[tokio::test]
+#[ignore = "requires docker compose"]
+async fn test_clickhouse_contract() {
+    use super::clickhouse::ch_exec;
+    use base64::Engine;
+
+    let output = json!({ "clickhouse": {
+        "url": "http://localhost:8123", "username": "testuser", "password": "testpass",
+        "table": "contract_$ID",
+    } });
+    let contract = Contract::sink_only("clickhouse", output, |id| async move {
+        let rows = ch_exec(&format!(
+            "SELECT payload FROM contract_{id} FORMAT JSONEachRow"
+        ))
+        .await;
+        rows.lines()
+            .map(|row| {
+                let row: serde_json::Value = serde_json::from_str(row)?;
+                let encoded = row["payload"].as_str().unwrap_or_default();
+                Ok(base64::engine::general_purpose::STANDARD.decode(encoded)?)
+            })
+            .collect()
+    })
+    .json_payloads()
+    .setup(|id| async move {
+        ch_exec(&format!(
+            "CREATE TABLE contract_{id} (payload String) ENGINE = MergeTree ORDER BY tuple()"
+        ))
+        .await;
+    });
+    check(compose("clickhouse"), contract).await;
+}
+
+/// S3 as a sink: every object under the check's prefix is read back.
+#[cfg(feature = "object-store")]
+#[tokio::test]
+#[ignore = "requires docker compose"]
+async fn test_object_store_contract() {
+    use ::object_store::{path::Path, ObjectStore, ObjectStoreExt};
+    use futures::TryStreamExt;
+
+    use super::object_store::{ensure_bucket, set_s3_env, BUCKET};
+
+    set_s3_env();
+    let output =
+        json!({ "object_store": { "url": format!("s3://{BUCKET}/$ID"), "format": "normal" } });
+    let contract = Contract::sink_only("object_store", output, |id| async move {
+        let store = ::object_store::aws::AmazonS3Builder::from_env()
+            .with_bucket_name(BUCKET)
+            .build()?;
+        let objects: Vec<_> = store.list(Some(&Path::from(id))).try_collect().await?;
+        let mut payloads = Vec::new();
+        for object in objects {
+            let body = store.get(&object.location).await?.bytes().await?;
+            for line in body.split(|byte| *byte == b'\n').filter(|l| !l.is_empty()) {
+                let message: mq_bridge::CanonicalMessage = serde_json::from_slice(line)?;
+                payloads.push(message.payload.to_vec());
+            }
+        }
+        Ok(payloads)
+    })
+    .setup(|_| ensure_bucket());
+    check(compose("object_store"), contract).await;
+}
+
+/// One queue shared by all checks: the channel may only open the queues defined in `mq_init.mqsc`.
+#[cfg(feature = "ibm-mq")]
+#[tokio::test]
+#[ignore = "requires docker compose and the IBM MQ client"]
+async fn test_ibm_mq_contract() {
+    if !super::ibm_mq::client_available() {
+        println!("ibm_mq: no MQ client library installed, skipped");
+        return;
+    }
+    let ibm_mq = json!({ "ibmmq": {
+        "url": "localhost(1414)", "queue": "DEV.QUEUE.1", "queue_manager": "QM1",
+        "channel": "DEV.APP.SVRCONN", "username": "app", "password": "adminpass",
+    } });
+    let contract = Contract::new("ibm_mq", ibm_mq.clone(), ibm_mq)
+        .id_not_kept()
+        .no_metadata()
+        .skip(
+            mq_bridge::test_utils::contract::Check::MixedAcks,
+            "a batch is one MQ transaction: a nack backs out its acked messages too",
+        );
+    check(compose("ibm_mq"), contract).await;
+}
+
 /// The sqlx queue table read through logical replication instead of by polling. One shared
 /// table and slot: a slot per check would exhaust `max_replication_slots`.
 #[cfg(feature = "postgres-cdc")]

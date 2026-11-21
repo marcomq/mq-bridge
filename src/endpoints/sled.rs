@@ -51,6 +51,13 @@ pub fn close_db(path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Flushes on a blocking thread: concurrent `Tree::flush_async` calls deadlock in sled 0.34.
+pub(crate) async fn flush(tree: &Tree) -> anyhow::Result<()> {
+    let tree = tree.clone();
+    tokio::task::spawn_blocking(move || tree.flush()).await??;
+    Ok(())
+}
+
 impl SledPublisher {
     pub fn new(config: &SledConfig) -> anyhow::Result<Self> {
         let db = get_or_open_db(&config.path).context("Failed to open Sled DB")?;
@@ -79,10 +86,7 @@ impl MessagePublisher for SledPublisher {
             .insert(key, value)
             .map_err(|e| PublisherError::Retryable(anyhow!(e)))?;
 
-        self.tree
-            .flush_async()
-            .await
-            .map_err(|e| PublisherError::Retryable(anyhow!(e)))?;
+        flush(&self.tree).await.map_err(PublisherError::Retryable)?;
         Ok(Sent::Ack)
     }
 
@@ -107,10 +111,7 @@ impl MessagePublisher for SledPublisher {
         self.tree
             .apply_batch(batch)
             .map_err(|e| PublisherError::Retryable(anyhow!(e)))?;
-        self.tree
-            .flush_async()
-            .await
-            .map_err(|e| PublisherError::Retryable(anyhow!(e)))?;
+        flush(&self.tree).await.map_err(PublisherError::Retryable)?;
 
         Ok(SentBatch::Ack)
     }

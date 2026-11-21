@@ -11,11 +11,11 @@ use mq_bridge::test_utils::{run_pipeline_test, run_test_with_docker, setup_loggi
 use mq_bridge::traits::{MessageConsumer, MessagePublisher};
 use mq_bridge::CanonicalMessage;
 
-const BUCKET: &str = "mqb-object-store-test";
+pub(super) const BUCKET: &str = "mqb-object-store-test";
 const ENDPOINT: &str = "http://localhost:4566";
 
 /// Points the `object_store` crate at LocalStack S3 over plain HTTP.
-fn set_s3_env() {
+pub(super) fn set_s3_env() {
     // SAFETY: test-only; every caller writes the same values.
     unsafe {
         std::env::set_var("AWS_ACCESS_KEY_ID", "test");
@@ -28,7 +28,7 @@ fn set_s3_env() {
 
 /// Creates the test bucket (path-style PUT). LocalStack accepts the unsigned request and
 /// the call is idempotent, so re-running against a warm container is fine.
-async fn ensure_bucket() {
+pub(super) async fn ensure_bucket() {
     let client = reqwest::Client::new();
     client
         .put(format!("{ENDPOINT}/{BUCKET}"))

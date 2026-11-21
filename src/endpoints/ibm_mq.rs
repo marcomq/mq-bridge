@@ -648,7 +648,7 @@ fn receive_messages<C: AsConnection>(
                 let buffer_len = data.len();
                 buffer[..buffer_len].fill(0);
             }
-            Ok(None) => {}
+            Ok(None) => break,
             Err(e) if e.0 == constants::MQCC_FAILED && e.2 == constants::MQRC_NO_MSG_AVAILABLE => {
                 break;
             }

@@ -8,7 +8,7 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 
-ALL="dir_spool sqlite sled file nats amqp kafka redis_streams mongodb mqtt mysql mariadb aws postgres postgres_cdc"
+ALL="dir_spool sqlite sled file nats amqp kafka redis_streams mongodb mqtt mysql mariadb aws postgres postgres_cdc clickhouse object_store ibm_mq"
 LIMIT_SECONDS=${MQB_CONTRACT_LIMIT:-600}
 prune=false
 brokers=""

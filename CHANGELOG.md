@@ -22,6 +22,15 @@ All notable changes to `mq-bridge`. Newest first.
   does. A query writing such a value into a PostgreSQL `float8` or `numeric` column without
   a cast now fails with error `42804`; write `CAST(${payload:x} AS numeric)` there.
 
+### Fixed
+
+- **`sled` output and `deduplication`: concurrent sends no longer hang.** Concurrent
+  `flush_async` calls deadlock in sled 0.34, so a route could stop for good without an error.
+  The flush now runs on a blocking thread.
+- **`ibmmq` input: a partly filled batch no longer stalls.** An empty queue did not end the
+  batch, so each remaining slot waited `wait_timeout_ms` again. With the defaults, one message
+  could take over 8 minutes to arrive. The batch now ends at the first empty wait.
+
 ## 1.6.2
 
 ### Fixed
