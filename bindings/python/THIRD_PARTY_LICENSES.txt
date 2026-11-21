@@ -1357,6 +1357,11 @@ libmqm-sys@0.10.2
 License: Apache-2.0
 Source: https://github.com/advantic-au/libmqm-sys
 
+libredox@0.1.25
+License: MIT
+Source: https://gitlab.redox-os.org/redox-os/libredox.git
+Copyright/attribution: Copyright (c) 2023 4lDO2
+
 libsqlite3-sys@0.37.0
 License: MIT
 Source: https://github.com/rusqlite/rusqlite
@@ -1596,6 +1601,16 @@ num-traits@0.2.19
 License: MIT OR Apache-2.0
 Source: https://github.com/rust-num/num-traits
 Copyright/attribution: Copyright (c) 2014 The Rust Project Developers
+
+objc2-core-foundation@0.3.2
+License: Zlib OR Apache-2.0 OR MIT
+Source: https://github.com/madsmtm/objc2
+Copyright/attribution: Copyright holders/authors: objc2-core-foundation contributors
+
+objc2-system-configuration@0.3.2
+License: Zlib OR Apache-2.0 OR MIT
+Source: https://github.com/madsmtm/objc2
+Copyright/attribution: Copyright holders/authors: objc2-system-configuration contributors
 
 object_store@0.14.2
 License: MIT/Apache-2.0
@@ -3435,6 +3450,44 @@ freely, subject to the following restrictions:
    misrepresented as being the original software.
 
 3. This notice may not be removed or altered from any source distribution.
+
+----- Additional text 1aa0a3422448 -----
+Applies to: objc2-core-foundation@0.3.2, objc2-system-configuration@0.3.2
+
+# License
+
+The licensing of these crates is a bit complicated:
+- The crates `objc2`, `block2`, `objc2-foundation` and `objc2-encode` are
+  [currently][#23] licensed under [the MIT license][MIT].
+- All other crates are trio-licensed under the [Zlib], [Apache-2.0] or [MIT]
+  license, at your option.
+
+Furthermore, the crates are (usually automatically) derived from Apple SDKs,
+and that may have implications for licensing, see below for details.
+
+[#23]: https://github.com/madsmtm/objc2/issues/23
+[MIT]: https://opensource.org/license/MIT
+[Zlib]: https://zlib.net/zlib_license.html
+[Apache-2.0]: https://www.apache.org/licenses/LICENSE-2.0
+
+
+## Apple SDKs
+
+These crates are derived from Apple SDKs shipped with Xcode. You can obtain a
+copy of the Xcode license at:
+
+https://www.apple.com/legal/sla/docs/xcode.pdf
+
+Or by typing `xcodebuild -license` in your terminal.
+
+From reading the license, it is unclear whether distributing derived works
+such as these crates are allowed?
+
+But in any case, to practically use these crates, you will have to link, and
+that only works when you have the correct Xcode SDK available to provide the
+required `.tbd` files, which is why we choose to still use the normal SPDX
+identifiers in the crates (Xcode is required to use the crates, and when using
+Xcode you have already agreed to the Xcode license).
 
 ----- Additional text 24fa06d8eae3 -----
 Applies to: subtle@2.6.1
