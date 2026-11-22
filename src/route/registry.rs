@@ -31,7 +31,10 @@ pub(super) type EndpointOverlay = HashMap<String, Option<Endpoint>>;
 pub(super) struct ActiveRoute {
     route: Route,
     handle: RouteHandle,
+    deployment: u64,
 }
+
+static NEXT_DEPLOYMENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub(super) fn recover_write_lock<'a, T>(
     lock: &'a RwLock<T>,
@@ -233,12 +236,19 @@ impl Route {
     /// # });
     /// ```
     pub async fn deploy(&self, name: &str) -> anyhow::Result<()> {
+        self.deploy_tracked(name).await.map(|_| ())
+    }
+
+    /// [`deploy`](Self::deploy), returning an id for [`stop_deployment`](Self::stop_deployment).
+    pub(super) async fn deploy_tracked(&self, name: &str) -> anyhow::Result<u64> {
         Self::stop(name).await;
 
         let handle = self.run(name).await?;
+        let deployment = NEXT_DEPLOYMENT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let active = ActiveRoute {
             route: self.clone(),
             handle,
+            deployment,
         };
 
         let registry = ROUTE_REGISTRY.get_or_init(|| RwLock::new(HashMap::new()));
@@ -250,7 +260,26 @@ impl Route {
         if let Some(replaced) = replaced {
             Self::stop_active(replaced).await;
         }
-        Ok(())
+        Ok(deployment)
+    }
+
+    /// Stops `name` only if it is still this deployment, not a later one under the same name.
+    pub(super) async fn stop_deployment(name: &str, deployment: u64) -> bool {
+        let registry = ROUTE_REGISTRY.get_or_init(|| RwLock::new(HashMap::new()));
+        let active = {
+            let mut map = recover_write_lock(registry, "route_registry");
+            match map.get(name) {
+                Some(active) if active.deployment == deployment => map.remove(name),
+                _ => None,
+            }
+        };
+        match active {
+            Some(active) => {
+                Self::stop_active(active).await;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Stops a running route by name and removes it from the registry.

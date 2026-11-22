@@ -13,8 +13,8 @@
 //! The [`HandlerContext`] passed with each message can [`emit`](HandlerContext::emit)
 //! any number of messages while the handler runs (e.g. one per generated sentence) and
 //! reports whether the message's `correlation_id` was cancelled through a
-//! [`CancelHandle`]. An [`Output`] sends to a named target, from a handler or any other
-//! thread, and is wired up with [`ThreadedHandler::builder`].
+//! [`CancelHandle`]. [`ThreadedHandler::builder`] gives it named [`Publisher`]s, which
+//! it reads with [`HandlerContext::output`].
 //!
 //! ```
 //! use mq_bridge::blocking_handler::{BlockingHandler, HandlerContext, ThreadedHandler};
@@ -37,7 +37,6 @@
 //! cancel.cancel("turn-7");
 //! ```
 
-use crate::models::Endpoint;
 use crate::traits::{Handled, Handler, HandlerError, MessagePublisher};
 use crate::{CanonicalMessage, Publisher};
 use anyhow::anyhow;
@@ -126,13 +125,14 @@ pub struct HandlerContext {
     seen_generation: AtomicU64,
     cancelled: AtomicBool,
     emitter: Option<Arc<dyn MessagePublisher>>,
-    outputs: Arc<HashMap<String, Output>>,
+    outputs: Arc<HashMap<String, Publisher>>,
     runtime: tokio::runtime::Handle,
 }
 
 impl HandlerContext {
-    /// The output declared under `name` on [`ThreadedHandler::builder`].
-    pub fn output(&self, name: &str) -> Result<&Output, HandlerError> {
+    /// The publisher declared under `name` on [`ThreadedHandler::builder`]. Send with
+    /// [`Publisher::blocking_send`]. Unlike [`emit`](Self::emit), that adds no `correlation_id`.
+    pub fn output(&self, name: &str) -> Result<&Publisher, HandlerError> {
         self.outputs.get(name).ok_or_else(|| {
             let mut declared: Vec<_> = self.outputs.keys().map(String::as_str).collect();
             declared.sort_unstable();
@@ -183,58 +183,23 @@ impl HandlerContext {
     }
 }
 
-/// A target to send to from a handler or any other thread. Cheap to clone.
-///
-/// Unlike [`HandlerContext::emit`], it adds no `correlation_id`, so a cancel does not skip
-/// what it sends.
-#[derive(Clone)]
-pub struct Output {
-    publisher: Arc<dyn MessagePublisher>,
-    runtime: tokio::runtime::Handle,
-}
-
-impl Output {
-    /// Connects to `endpoint`. Sends run on the current Tokio runtime.
-    pub async fn new(endpoint: Endpoint) -> anyhow::Result<Self> {
-        Ok(Self {
-            publisher: Publisher::new(endpoint).await?.inner(),
-            runtime: tokio::runtime::Handle::current(),
-        })
-    }
-
-    /// Sends `msg` and returns once the target accepted it.
-    ///
-    /// # Panics
-    ///
-    /// When called from an async context, as it blocks the thread. Use
-    /// [`send_async`](Self::send_async) there.
-    pub fn send(&self, msg: CanonicalMessage) -> Result<(), HandlerError> {
-        self.runtime.block_on(self.send_async(msg))
-    }
-
-    /// Sends `msg` and resolves once the target accepted it.
-    pub async fn send_async(&self, msg: CanonicalMessage) -> Result<(), HandlerError> {
-        self.publisher.send(msg).await.map(|_| ())
-    }
-}
-
 /// Declares what a [`ThreadedHandler`] sends to. Made by [`ThreadedHandler::builder`].
 pub struct ThreadedHandlerBuilder<H> {
     handler: H,
     emit_name: Option<String>,
-    outputs: HashMap<String, Output>,
+    outputs: HashMap<String, Publisher>,
 }
 
 impl<H: BlockingHandler> ThreadedHandlerBuilder<H> {
     /// Makes `output` available as [`HandlerContext::output`]`(name)`.
     /// A repeated name replaces it, also as the target of [`HandlerContext::emit`].
-    pub fn output(mut self, name: &str, output: Output) -> Self {
+    pub fn output(mut self, name: &str, output: Publisher) -> Self {
         self.outputs.insert(name.to_string(), output);
         self
     }
 
     /// Like [`output`](Self::output), declaring nothing for `None`.
-    pub fn output_opt(self, name: &str, output: Option<Output>) -> Self {
+    pub fn output_opt(self, name: &str, output: Option<Publisher>) -> Self {
         match output {
             Some(output) => self.output(name, output),
             None => self,
@@ -242,7 +207,7 @@ impl<H: BlockingHandler> ThreadedHandlerBuilder<H> {
     }
 
     /// Like [`output`](Self::output), and makes `output` the target of [`HandlerContext::emit`].
-    pub fn emit_to(mut self, name: &str, output: Output) -> Self {
+    pub fn emit_to(mut self, name: &str, output: Publisher) -> Self {
         self.emit_name = Some(name.to_string());
         self.output(name, output)
     }
@@ -252,7 +217,7 @@ impl<H: BlockingHandler> ThreadedHandlerBuilder<H> {
         let emitter = self
             .emit_name
             .and_then(|name| self.outputs.get(&name))
-            .map(|output| output.publisher.clone());
+            .map(Publisher::inner);
         ThreadedHandler::spawn(self.handler, emitter, Arc::new(self.outputs))
     }
 }
@@ -268,6 +233,7 @@ struct Job {
 pub struct ThreadedHandler {
     jobs: mpsc::Sender<Job>,
     cancel: Arc<CancelState>,
+    outputs: Arc<HashMap<String, Publisher>>,
 }
 
 impl ThreadedHandler {
@@ -285,7 +251,7 @@ impl ThreadedHandler {
     }
 
     /// Like [`new`](Self::new), with `emit_to` as the target of [`HandlerContext::emit`].
-    /// A [`Publisher`](crate::Publisher) passes its [`inner`](crate::Publisher::inner).
+    /// A [`Publisher`] passes its [`inner`](crate::Publisher::inner).
     pub fn with_emitter(handler: impl BlockingHandler, emit_to: Arc<dyn MessagePublisher>) -> Self {
         Self::spawn(handler, Some(emit_to), Arc::default())
     }
@@ -297,15 +263,20 @@ impl ThreadedHandler {
     fn spawn(
         mut handler: impl BlockingHandler,
         emitter: Option<Arc<dyn MessagePublisher>>,
-        outputs: Arc<HashMap<String, Output>>,
+        outputs: Arc<HashMap<String, Publisher>>,
     ) -> Self {
         let (jobs, rx) = mpsc::channel::<Job>();
         let cancel = Arc::new(CancelState::default());
         let state = cancel.clone();
+        let declared = outputs.clone();
         std::thread::Builder::new()
             .name("mqb-handler".into())
             .spawn(move || {
                 for job in rx {
+                    // The caller gave up, so this message is redelivered.
+                    if job.reply.is_closed() {
+                        continue;
+                    }
                     // Read before the check, so a cancel racing with it bumps the generation.
                     let generation = state.generation.load(Ordering::Acquire);
                     let correlation_id =
@@ -336,12 +307,26 @@ impl ThreadedHandler {
                 }
             })
             .expect("failed to spawn mqb-handler thread");
-        Self { jobs, cancel }
+        Self {
+            jobs,
+            cancel,
+            outputs: declared,
+        }
     }
 }
 
 #[async_trait]
 impl Handler for ThreadedHandler {
+    fn declared_outputs(&self) -> Vec<(String, String)> {
+        let mut outputs: Vec<_> = self
+            .outputs
+            .iter()
+            .map(|(name, output)| (name.clone(), output.label().to_string()))
+            .collect();
+        outputs.sort_unstable();
+        outputs
+    }
+
     async fn handle(&self, msg: CanonicalMessage) -> Result<Handled, HandlerError> {
         let (reply, result) = oneshot::channel();
         let job = Job {
@@ -453,11 +438,11 @@ mod tests {
         ));
     }
 
-    async fn memory_output(topic: &str) -> (Output, crate::endpoints::memory::MemoryChannel) {
+    async fn memory_output(topic: &str) -> (Publisher, crate::endpoints::memory::MemoryChannel) {
         let config = crate::models::MemoryConfig::new(topic, Some(16));
         let channel = crate::get_or_create_channel(&config);
-        let output = Output::new(Endpoint::new_memory(topic, 16)).await.unwrap();
-        (output, channel)
+        let endpoint = crate::models::Endpoint::new_memory(topic, 16);
+        (Publisher::new(endpoint).await.unwrap(), channel)
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -467,7 +452,7 @@ mod tests {
         let handler = ThreadedHandler::builder(|_: CanonicalMessage, ctx: &HandlerContext| {
             ctx.emit(CanonicalMessage::from("token"))?;
             ctx.output("reports")?
-                .send(CanonicalMessage::from("report"))?;
+                .blocking_send(CanonicalMessage::from("report"))?;
             let unknown = ctx.output("typo").err().unwrap().to_string();
             assert!(unknown.contains("typo") && unknown.contains("reports, tokens"));
             Ok(Handled::Ack)
@@ -509,8 +494,12 @@ mod tests {
         let (output, channel) = memory_output("blocking_handler_plain_thread").await;
         tokio::task::spawn_blocking(move || {
             std::thread::spawn(move || {
-                output.send(CanonicalMessage::from("first")).unwrap();
-                output.send(CanonicalMessage::from("second")).unwrap();
+                output
+                    .blocking_send(CanonicalMessage::from("first"))
+                    .unwrap();
+                output
+                    .blocking_send(CanonicalMessage::from("second"))
+                    .unwrap();
             })
             .join()
             .unwrap();
@@ -521,6 +510,47 @@ mod tests {
         let sent = channel.drain_messages();
         let payloads: Vec<_> = sent.iter().map(|m| m.get_payload_str()).collect();
         assert_eq!(payloads, ["first", "second"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_dropped_call_does_not_run_its_queued_message() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let (ran_tx, ran_rx) = mpsc::channel();
+        let handler = Arc::new(ThreadedHandler::new(
+            move |msg: CanonicalMessage, _: &HandlerContext| {
+                let payload = msg.get_payload_str().to_string();
+                ran_tx.send(payload.clone()).unwrap();
+                if payload == "running" {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                }
+                Ok(Handled::Ack)
+            },
+        ));
+
+        let running = tokio::spawn({
+            let handler = handler.clone();
+            async move { handler.handle(CanonicalMessage::from("running")).await }
+        });
+        tokio::task::spawn_blocking(move || started_rx.recv().unwrap())
+            .await
+            .unwrap();
+        let dropped = tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            handler.handle(CanonicalMessage::from("dropped")),
+        )
+        .await;
+        assert!(dropped.is_err());
+
+        release_tx.send(()).unwrap();
+        running.await.unwrap().unwrap();
+        handler
+            .handle(CanonicalMessage::from("next"))
+            .await
+            .unwrap();
+
+        assert_eq!(ran_rx.try_iter().collect::<Vec<_>>(), ["running", "next"]);
     }
 
     #[test]

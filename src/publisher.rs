@@ -11,6 +11,8 @@ use std::sync::{OnceLock, PoisonError, RwLock};
 #[derive(Clone)]
 pub struct Publisher {
     publisher: std::sync::Arc<dyn traits::MessagePublisher>,
+    runtime: Option<tokio::runtime::Handle>,
+    label: std::sync::Arc<str>,
 }
 
 static PUBLISHER_REGISTRY: OnceLock<RwLock<HashMap<String, Publisher>>> = OnceLock::new();
@@ -19,7 +21,11 @@ impl Publisher {
     /// Creates a new publisher for the given endpoint configuration.
     pub async fn new(endpoint: models::Endpoint) -> anyhow::Result<Self> {
         let publisher = endpoints::create_publisher_from_route("publisher", &endpoint).await?;
-        Ok(Self { publisher })
+        Ok(Self {
+            publisher,
+            runtime: tokio::runtime::Handle::try_current().ok(),
+            label: crate::route::endpoint_label(&endpoint).into(),
+        })
     }
 
     /// Creates a publisher from a JSON endpoint configuration.
@@ -72,6 +78,25 @@ impl Publisher {
             .map_err(|e| anyhow::anyhow!(e))
     }
 
+    /// Sends a message from a thread outside the runtime and returns once it was accepted.
+    /// Fails if this publisher was created outside a Tokio runtime.
+    ///
+    /// # Panics
+    ///
+    /// When called from an async context, as it blocks the thread. Use [`send`](Self::send) there.
+    pub fn blocking_send(&self, message: CanonicalMessage) -> Result<Sent, traits::PublisherError> {
+        let runtime = self.runtime.as_ref().ok_or_else(|| {
+            traits::PublisherError::NonRetryable(anyhow::anyhow!(
+                "blocking_send needs a publisher created inside a Tokio runtime"
+            ))
+        })?;
+        runtime.block_on(self.publisher.send(message))
+    }
+
+    pub(crate) fn label(&self) -> &str {
+        &self.label
+    }
+
     /// Sends a batch of messages to the configured endpoint.
     pub async fn send_batch(&self, messages: Vec<CanonicalMessage>) -> anyhow::Result<SentBatch> {
         self.publisher
@@ -120,6 +145,8 @@ where
     fn from(p: T) -> Self {
         Self {
             publisher: std::sync::Arc::new(p),
+            runtime: tokio::runtime::Handle::try_current().ok(),
+            label: "publisher".into(),
         }
     }
 }

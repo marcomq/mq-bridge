@@ -230,7 +230,8 @@ pub use endpoints::memory::get_or_create_channel;
 pub use publisher::{get_publisher, list_publishers, register_publisher, unregister_publisher};
 pub use route::{
     get_route, list_routes, register_endpoint, route_outcome, route_status, set_route_display_name,
-    stop_route, unregister_endpoint, with_endpoint_overrides, RouteOutcome,
+    stop_route, unregister_endpoint, with_endpoint_overrides, DeployedTopology, RouteOutcome,
+    Topology, TopologyError,
 };
 
 // Re-export the underlying driver crate for each feature-gated endpoint, so

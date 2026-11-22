@@ -19,9 +19,17 @@ All notable changes to `mq-bridge`. Newest first.
   reply always ends with one last token, a retried attempt does not end it, and dropping an
   unfinished reply cancels the request. One caller serves parallel requests under different
   correlation ids. `StreamToken` reads and writes the `mqb.stream.*` format.
-- **Named outputs for blocking handlers.** `Output` sends to an endpoint from a handler or any
-  other thread and adds no `correlation_id`, so a cancel does not skip it.
-  `ThreadedHandler::builder` declares a handler's outputs, and `ctx.output(name)` reads them.
+- **`Publisher::blocking_send`** sends from a plain OS thread and returns once the message was
+  accepted.
+- **Named outputs for blocking handlers.** `ThreadedHandler::builder` declares a handler's
+  `Publisher`s, and `ctx.output(name)` reads them. Unlike `ctx.emit`, they add no `correlation_id`,
+  so a cancel does not skip what they send.
+- **`Topology` wires routes up in one place.** It starts them in declaration order, stops them in
+  reverse or in an explicit order, cleans up after a failed start and names the failing route.
+  `stop()` leaves a route alone that was deployed again since. `diagram()` shows each route with
+  its handler's declared outputs.
+- **`Route::handled_by(input, handler)` declares a route that ends in its handler**, without a
+  placeholder `Endpoint::null()` output.
 - **`http_bulk` queries log token usage.** At `DEBUG`, each non-streaming response with an
   OpenAI-style `usage` logs `prompt_tokens`, `cached_tokens` and `completion_tokens`.
 
@@ -33,6 +41,8 @@ All notable changes to `mq-bridge`. Newest first.
   a cast now fails with error `42804`; write `CAST(${payload:x} AS numeric)` there.
 
 ### Fixed
+- **`ThreadedHandler` no longer runs a queued message whose caller gave up.** After a timeout or an
+  aborted route, the message ran anyway and then again when it was redelivered.
 - **`openai_chat`: a `system` prompt that names its own answer format no longer breaks
   `messages_per_request`.** The model followed that format instead of the `answers` array, so
   a bundle of 15 messages was split into 12 requests and could lose a message. A bundle now

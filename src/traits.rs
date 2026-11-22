@@ -152,6 +152,12 @@ pub trait Handler: Send + Sync + 'static {
         None
     }
 
+    /// Named outputs as `(name, target)`, for the [`Topology`](crate::Topology) diagram.
+    #[doc(hidden)]
+    fn declared_outputs(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
     /// Tries to register a handler for a specific type.
     /// Returns `None` if this handler does not support registration (e.g. it's not a TypeHandler).
     fn register_handler(
@@ -179,6 +185,10 @@ impl<T: Handler + ?Sized> Handler for Arc<T> {
 
     fn observe(&self, msgs: &[CanonicalMessage]) -> Option<Passthrough> {
         (**self).observe(msgs)
+    }
+
+    fn declared_outputs(&self) -> Vec<(String, String)> {
+        (**self).declared_outputs()
     }
 
     fn register_handler(

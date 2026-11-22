@@ -55,6 +55,7 @@
 //! | `run.rs` | reconnect loop, sequential and concurrent runners |
 //! | `send.rs`, `commit.rs`, `flush_gate.rs` | one batch: send, failure policy, ordered or concurrent commit, deferred commits |
 //! | `handle.rs`, `hooks.rs`, `registry.rs` | handle and outcome; connect hooks; process-wide registries |
+//! | `topology.rs` | several routes declared, started and stopped from one place |
 
 use crate::endpoints::{
     check_source_position_available, create_consumer_from_route,
@@ -94,6 +95,7 @@ mod run;
 mod send;
 #[cfg(test)]
 mod tests;
+mod topology;
 
 use commit::*;
 use flush_gate::FlushGate;
@@ -109,6 +111,9 @@ pub(crate) use hooks::{
 };
 pub(crate) use registry::route_display_name;
 use registry::*;
+pub(crate) use topology::endpoint_label;
+pub use topology::{DeployedTopology, Topology, TopologyError};
+
 pub use registry::{
     get_endpoint, get_route, list_routes, register_endpoint, route_outcome, route_status,
     set_route_display_name, stop_route, unregister_endpoint, with_endpoint_overrides,
