@@ -8,3 +8,5 @@ examples/out/
 
 # Library downloaded by nimble install / nimble getlib
 src/lib/
+nimble.develop
+nimble.paths
