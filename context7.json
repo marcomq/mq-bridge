@@ -1,0 +1,22 @@
+{
+  "$schema": "https://context7.com/schema/context7.json",
+  "projectTitle": "mq-bridge",
+  "description": "Asynchronous Rust library, with Python and Node.js bindings, that moves messages and data between brokers, databases, object storage, files and HTTP.",
+  "folders": ["docs", "examples"],
+  "excludeFolders": [
+    "docs/assets",
+    "docs/book/animations",
+    "docs/book/images",
+    "docs/book/theme",
+    "node_modules",
+    "target"
+  ],
+  "excludeFiles": ["MIGRATING_TO_2.0.md", "THIRD_PARTY_LICENSES.md"],
+  "rules": [
+    "Use the docs of the version in Cargo.lock. The crate ships llms.txt and docs/ for its exact version.",
+    "Take field names from docs/REFERENCE.md or `mqb describe <name> --json`. Do not infer them from models.rs.",
+    "Connectors are Cargo features. Only `file` and `dir-spool` are enabled by default.",
+    "StreamCaller and docs/HANDLERS.md require mq-bridge 1.7.0 or later."
+  ],
+  "previousVersions": [{ "tag": "v1.6.2" }, { "tag": "v1.6.1" }]
+}

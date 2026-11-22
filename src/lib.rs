@@ -150,8 +150,10 @@
 //!   configuration types.
 //! - Read the [architecture guide](https://github.com/marcomq/mq-bridge/blob/dev/docs/ARCHITECTURE.md)
 //!   for routing, handlers, batching, and delivery semantics.
+//! - Read [`handlers_guide`] for blocking handlers, `emit`, cancelling and streamed answers.
 //! - Read the [documentation book](https://marcomq.github.io/mq-bridge/) for setup,
 //!   connector configuration, and recipes.
+//! - Coding agents: the crate ships `llms.txt` and `docs/REFERENCE.md` for this exact version.
 //!
 //! # Stability
 //!
@@ -177,6 +179,10 @@
 
 #![warn(rustdoc::broken_intra_doc_links)]
 #![warn(rustdoc::missing_crate_level_docs)]
+
+#[cfg(any(doc, doctest))]
+#[doc = include_str!("../docs/HANDLERS.md")]
+pub mod handlers_guide {}
 
 pub mod blocking_handler;
 pub mod caller;

@@ -19,6 +19,9 @@ All notable changes to `mq-bridge`. Newest first.
   reply always ends with one last token, a retried attempt does not end it, and dropping an
   unfinished reply cancels the request. One caller serves parallel requests under different
   correlation ids. `StreamToken` reads and writes the `mqb.stream.*` format.
+- **Named outputs for blocking handlers.** `Output` sends to an endpoint from a handler or any
+  other thread and adds no `correlation_id`, so a cancel does not skip it.
+  `ThreadedHandler::builder` declares a handler's outputs, and `ctx.output(name)` reads them.
 - **`http_bulk` queries log token usage.** At `DEBUG`, each non-streaming response with an
   OpenAI-style `usage` logs `prompt_tokens`, `cached_tokens` and `completion_tokens`.
 
