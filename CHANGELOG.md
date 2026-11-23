@@ -6,6 +6,14 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Added
 
+- **`Bridge`: named instances for embedding applications.** Routes, publishers, callers, `ref`
+  endpoints and in-process topics get their own namespace, so two parts of an application can
+  use the same names. An optional `PolicyHook` approves every endpoint, nested ones included,
+  before it is used, and an optional `AuditSink` receives lifecycle events. This separates
+  names and is not a security boundary. The top-level API is unchanged.
+- **Applications can install their own sqlx drivers.** SQL endpoints panicked if the application
+  had already called `sqlx::any::install_drivers()`. Call
+  `mq_bridge::endpoints::sqlx::use_host_sqlx_drivers()` first, and mq-bridge leaves the drivers alone.
 - **Delivery contract for built-in and plugin endpoints.** `mq_bridge::test_utils::contract`
   (feature `test-utils`) runs one check catalog against any endpoint and reports every check
   as passed, failed or skipped. It adds parallel sends with rejects, reconnects, batch sizes,

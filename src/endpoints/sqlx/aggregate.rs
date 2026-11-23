@@ -93,7 +93,7 @@ pub(crate) async fn build_sql_state_store(
     url: &str,
     table: String,
 ) -> anyhow::Result<Arc<dyn StateStore>> {
-    sqlx::any::install_default_drivers();
+    super::install_sqlx_drivers();
     let pool = AnyPool::connect(url).await.with_context(|| {
         format!(
             "Failed to connect aggregate store at '{}'",

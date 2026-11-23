@@ -185,6 +185,7 @@
 pub mod handlers_guide {}
 
 pub mod blocking_handler;
+pub mod bridge;
 pub mod caller;
 pub mod canonical_message;
 // Not feature-gated: the trait, the file backend and the URL parser need no
@@ -217,6 +218,7 @@ pub mod traits;
 pub mod type_handler;
 
 pub use anyhow;
+pub use bridge::Bridge;
 pub use caller::{CallFields, Caller, CallerBuilder};
 pub use canonical_message::{CanonicalMessage, MessageContext};
 pub use config_file::deploy_file;

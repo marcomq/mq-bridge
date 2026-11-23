@@ -20,9 +20,27 @@ use sqlx::any::AnyPoolOptions;
 #[cfg(feature = "sqlx")]
 use sqlx::postgres::{PgPool, PgPoolCopyExt, PgPoolOptions};
 use sqlx::{AnyPool, AssertSqlSafe, Column, Row};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{info, trace, warn};
+
+static HOST_INSTALLS_DRIVERS: AtomicBool = AtomicBool::new(false);
+
+/// Tells mq-bridge that the application installs the sqlx `Any` drivers itself.
+///
+/// By default, SQL endpoints call `sqlx::any::install_default_drivers()`, which panics
+/// if the application already called `sqlx::any::install_drivers()`. Call this before
+/// creating an SQL endpoint when you do; your driver list must cover the endpoint URLs.
+pub fn use_host_sqlx_drivers() {
+    HOST_INSTALLS_DRIVERS.store(true, Ordering::Release);
+}
+
+fn install_sqlx_drivers() {
+    if !HOST_INSTALLS_DRIVERS.load(Ordering::Acquire) {
+        sqlx::any::install_default_drivers();
+    }
+}
 
 mod columns;
 mod cursor;
@@ -669,7 +687,7 @@ fn extract_copy_columns(
 
 impl SqlxPublisher {
     pub async fn new(config: &SqlxConfig) -> anyhow::Result<Self> {
-        sqlx::any::install_default_drivers();
+        install_sqlx_drivers();
         if !is_valid_table_name(&config.table) {
             return Err(anyhow!(
                 "Invalid table name: '{}'. Only alphanumeric characters and underscores are allowed.",
@@ -1296,7 +1314,7 @@ pub struct SqlxConsumer {
 
 impl SqlxConsumer {
     pub async fn new(config: &SqlxConfig) -> anyhow::Result<Self> {
-        sqlx::any::install_default_drivers();
+        install_sqlx_drivers();
         if !is_valid_table_name(&config.table) {
             return Err(anyhow!(
                 "Invalid table name: '{}'. Only alphanumeric characters and underscores are allowed.",

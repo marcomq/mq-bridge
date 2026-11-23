@@ -633,7 +633,7 @@ pub(crate) async fn build_sql_checkpoint_store(
     source_name: &str,
     cursor_id: &str,
 ) -> anyhow::Result<Arc<dyn crate::checkpoint::CheckpointStore>> {
-    sqlx::any::install_default_drivers();
+    super::install_sqlx_drivers();
     let pool = AnyPool::connect(url).await.with_context(|| {
         format!(
             "Failed to connect checkpoint store at '{}'",
@@ -755,7 +755,7 @@ pub(crate) async fn cursor_checkpoint(
     let (Some(cursor_id), Some(cursor_column)) = (&config.cursor_id, &config.cursor_column) else {
         return Ok(None);
     };
-    sqlx::any::install_default_drivers();
+    super::install_sqlx_drivers();
     open_cursor_checkpoint(config, cursor_id, cursor_column, None)
         .await
         .map(Some)
@@ -862,7 +862,7 @@ impl SqlxCursorReader {
         source_metadata: bool,
         no_resume: bool,
     ) -> anyhow::Result<Self> {
-        sqlx::any::install_default_drivers();
+        super::install_sqlx_drivers();
         if config.delete_after_read {
             return Err(anyhow!(
                 "SQLx `cursor_column` (non-destructive) and `delete_after_read` are mutually exclusive"

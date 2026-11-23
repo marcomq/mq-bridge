@@ -523,7 +523,7 @@ pub(crate) async fn build_sql_dedup_store(
     route_name: &str,
     replay_response: bool,
 ) -> anyhow::Result<Arc<dyn crate::middleware::deduplication::DedupStore>> {
-    sqlx::any::install_default_drivers();
+    super::install_sqlx_drivers();
     let pool = AnyPool::connect(url).await.with_context(|| {
         format!(
             "Failed to connect deduplication store at '{}'",
