@@ -316,6 +316,7 @@ pub struct SqlxPublisher {
     /// Ordered value sources for token-based multi-column inserts. Empty = legacy
     /// single-payload-bind mode (query has no `${...}` tokens).
     column_sources: Vec<ColumnSource>,
+    bind_shape: BindShape,
     driver_name: String,
     table: String,
     /// Present when `bulk_copy` is enabled (PostgreSQL, token-based query). When set,
@@ -738,6 +739,7 @@ impl SqlxPublisher {
             _shared_pool: shared_pool,
             insert_query: String::new(),
             column_sources: Vec::new(),
+            bind_shape: BindShape::default(),
             driver_name,
             table: config.table.clone(),
             copy: None,
@@ -973,7 +975,9 @@ impl MessagePublisher for SqlxPublisher {
         let query = if self.column_sources.is_empty() {
             query.bind(message.payload.to_vec())
         } else {
-            bind_message_sources(query, &message, &self.column_sources)?
+            let (query, cacheable) =
+                bind_cacheable(query, &message, &self.column_sources, &self.bind_shape)?;
+            query.persistent(cacheable)
         };
         query
             .execute(&self.pool)
@@ -1176,13 +1180,18 @@ impl SqlxPublisher {
             let sql = format!("{} VALUES {}{}", base_query, placeholders, values_suffix);
 
             let mut query = sqlx::query(audited_sql(&sql));
+            let mut cacheable = true;
             for msg in chunk {
                 if self.column_sources.is_empty() {
                     query = query.bind(msg.payload.to_vec());
                 } else {
-                    query = bind_message_sources(query, msg, &self.column_sources)?;
+                    let (bound, same_shape) =
+                        bind_cacheable(query, msg, &self.column_sources, &self.bind_shape)?;
+                    query = bound;
+                    cacheable &= same_shape;
                 }
             }
+            let query = query.persistent(cacheable);
             match (&mut held, &mut tx) {
                 (Some(held), _) => query.execute(held.any()?).await,
                 (None, Some(tx)) => query.execute(&mut **tx).await,
@@ -1289,7 +1298,9 @@ impl SqlxPublisher {
             let query = if self.column_sources.is_empty() {
                 query.bind(msg.payload.to_vec())
             } else {
-                bind_message_sources(query, msg, &self.column_sources)?
+                let (query, cacheable) =
+                    bind_cacheable(query, msg, &self.column_sources, &self.bind_shape)?;
+                query.persistent(cacheable)
             };
             query
                 .execute(&mut *conn)

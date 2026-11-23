@@ -128,15 +128,19 @@ fn registry() -> &'static RwLock<HashMap<String, Caller>> {
     CALLER_REGISTRY.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
+/// Drops the caller registered under `name`, whose route is about to be replaced.
+pub(crate) fn forget(name: &str) {
+    if let Some(callers) = CALLER_REGISTRY.get() {
+        callers
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(name);
+    }
+}
+
 impl Caller {
-    /// Deploys `route` under `name` and returns a caller for it.
-    ///
-    /// The input must be an in-process `memory` endpoint (not `ipc://`, not
-    /// `subscribe_mode`). Its `request_reply` is switched on, so a failed message is
-    /// answered with its error instead of stopping the route. Without a `capacity`, it
-    /// holds 4,096 waiting calls instead of 100. The caller is also
-    /// registered under `name` for [`Caller::get`].
-    pub async fn deploy(name: &str, mut route: Route) -> anyhow::Result<Self> {
+    /// Applies the input defaults of [`Caller::deploy`], without deploying.
+    pub(crate) fn prepare(name: &str, mut route: Route) -> anyhow::Result<Route> {
         let EndpointType::Memory(input) = &mut route.input.endpoint_type else {
             bail!("Caller '{name}': the route's input must be a `memory` endpoint");
         };
@@ -145,6 +149,21 @@ impl Caller {
         }
         input.request_reply = true;
         input.capacity.get_or_insert(CALLER_CAPACITY);
+        Ok(route)
+    }
+
+    /// Deploys `route` under `name` and returns a caller for it.
+    ///
+    /// The input must be an in-process `memory` endpoint (not `ipc://`, not
+    /// `subscribe_mode`). Its `request_reply` is switched on, so a failed message is
+    /// answered with its error instead of stopping the route. Without a `capacity`, it
+    /// holds 4,096 waiting calls instead of 100. The caller is also
+    /// registered under `name` for [`Caller::get`].
+    pub async fn deploy(name: &str, route: Route) -> anyhow::Result<Self> {
+        let route = Self::prepare(name, route)?;
+        let EndpointType::Memory(input) = &route.input.endpoint_type else {
+            unreachable!("prepare checked the input");
+        };
         let requests = MemoryPublisher::new(input)?;
         if !requests.answers_requests() {
             bail!("Caller '{name}': the memory input must be in-process, not a transport URL");

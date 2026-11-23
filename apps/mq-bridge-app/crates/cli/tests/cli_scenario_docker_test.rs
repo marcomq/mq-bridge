@@ -478,6 +478,7 @@ mod external {
         sink: |q| leg(q, |t| &t.output),
         source: |q| leg(q, |t| &t.input),
         available: || target().is_some(),
+        restart_rate: Some(10_000),
         ..BASE
     });
 

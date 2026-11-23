@@ -83,7 +83,16 @@ for broker in $brokers; do
   passed=$(count ok)
   red=$(count FAILED)
   skipped=$(count skipped)
-  if [ "$code" -eq 0 ]; then status=ok; else status=FAILED; failed=$((failed + 1)); fi
+  if [ "$code" -ne 0 ]; then
+    status=FAILED
+  elif [ "$passed" -gt 0 ]; then
+    status=ok
+  elif [ "$broker" = ibm_mq ] && grep -aqF "ibm_mq: no MQ client library installed, skipped" "$log"; then
+    status=skipped
+  else
+    status=FAILED
+  fi
+  [ "$status" = FAILED ] && failed=$((failed + 1))
   line=$(printf '%-14s %-7s %4ss  ok %2s  failed %2s  skipped %2s' \
     "$broker" "$status" "$seconds" "$passed" "$red" "$skipped")
   echo "$line"

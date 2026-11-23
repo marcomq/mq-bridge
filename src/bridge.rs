@@ -41,6 +41,7 @@ use crate::route::RouteOutcome;
 use crate::traits::EndpointStatus;
 use crate::{Caller, Publisher, Route};
 use anyhow::{anyhow, bail};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 const SEPARATOR: &str = "::";
@@ -233,8 +234,16 @@ impl Bridge {
 
     /// Deploys `route` as a [`Caller`] under `name` in this instance.
     pub async fn deploy_caller(&self, name: &str, route: Route) -> anyhow::Result<Caller> {
+        let key = self.key(name);
+        let route = match Caller::prepare(&key, route) {
+            Ok(route) => route,
+            Err(error) => {
+                self.record(name, AuditAction::DeployFailed, Some(format!("{error:#}")));
+                return Err(error);
+            }
+        };
         self.authorize(name, [&route.input, &route.output])?;
-        let result = Caller::deploy(&self.key(name), self.scoped_route(&route)).await;
+        let result = Caller::deploy(&key, self.scoped_route(&route)).await;
         match &result {
             Ok(_) => self.record(name, AuditAction::CallerDeployed, None),
             Err(error) => self.record(name, AuditAction::DeployFailed, Some(format!("{error:#}"))),
@@ -306,19 +315,11 @@ impl Bridge {
         let Some(policy) = &self.policy else {
             return Ok(());
         };
-        let mut verdict = Ok(());
-        for endpoint in endpoints {
+        let mut followed = HashSet::new();
+        let verdict = endpoints.into_iter().try_for_each(|endpoint| {
             let mut endpoint = self.scoped_endpoint(endpoint.clone());
-            for_each_endpoint(&mut endpoint, &mut |endpoint| {
-                if verdict.is_ok() {
-                    verdict = policy.check(&PolicyRequest {
-                        namespace: &self.namespace,
-                        name,
-                        endpoint,
-                    });
-                }
-            });
-        }
+            self.check_policy(policy.as_ref(), name, &mut endpoint, &mut followed)
+        });
         verdict.map_err(|reason| {
             self.record(name, AuditAction::Rejected, Some(reason.clone()));
             anyhow!(
@@ -326,6 +327,39 @@ impl Bridge {
                 self.namespace
             )
         })
+    }
+
+    /// Checks `endpoint` and everything nested in it, following each `ref` to its target.
+    fn check_policy(
+        &self,
+        policy: &dyn PolicyHook,
+        name: &str,
+        endpoint: &mut Endpoint,
+        followed: &mut HashSet<String>,
+    ) -> Result<(), String> {
+        let mut verdict = Ok(());
+        let mut refs = Vec::new();
+        for_each_endpoint(endpoint, &mut |endpoint| {
+            if verdict.is_ok() {
+                verdict = policy.check(&PolicyRequest {
+                    namespace: &self.namespace,
+                    name,
+                    endpoint,
+                });
+            }
+            if let EndpointType::Ref(target) = &endpoint.endpoint_type {
+                refs.push(target.clone());
+            }
+        });
+        verdict?;
+        for target in refs {
+            if followed.insert(target.clone()) {
+                if let Some(mut resolved) = crate::route::get_endpoint(&target) {
+                    self.check_policy(policy, name, &mut resolved, followed)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn record_result(&self, name: &str, success: AuditAction, result: &anyhow::Result<()>) {
@@ -472,6 +506,40 @@ mod tests {
         );
         found.sort();
         found
+    }
+
+    #[tokio::test]
+    async fn a_ref_is_checked_by_what_it_points_to() {
+        let open = bridge("ref-policy");
+        open.register_endpoint("secret", Endpoint::new_memory("secret", 10))
+            .unwrap();
+        open.register_endpoint("public", Endpoint::new_memory("public", 10))
+            .unwrap();
+        let guarded = open.with_policy(Arc::new(DenyTopic("secret")));
+        let to =
+            |name: &str| -> Endpoint { serde_json::from_value(json!({ "ref": name })).unwrap() };
+
+        let denied = Route::new(Endpoint::new_memory("in", 10), to("secret"));
+        assert!(guarded.deploy("denied", &denied).await.is_err());
+        let allowed = Route::new(Endpoint::new_memory("in", 10), to("public"));
+        guarded.deploy("allowed", &allowed).await.unwrap();
+        guarded.stop_all().await;
+    }
+
+    #[tokio::test]
+    async fn a_route_that_replaces_a_caller_ends_its_registration() {
+        let instance = bridge("replaced-caller");
+        let input = Endpoint::new_memory("calls", 10);
+        instance
+            .deploy_caller("answers", Route::new(input, Endpoint::new_response()))
+            .await
+            .unwrap();
+        assert!(instance.get_caller("answers").is_some());
+
+        instance.deploy("answers", &memory_route()).await.unwrap();
+
+        assert!(instance.get_caller("answers").is_none());
+        instance.stop_all().await;
     }
 
     #[tokio::test]

@@ -241,6 +241,7 @@ impl Route {
 
     /// [`deploy`](Self::deploy), returning an id for [`stop_deployment`](Self::stop_deployment).
     pub(super) async fn deploy_tracked(&self, name: &str) -> anyhow::Result<u64> {
+        crate::caller::forget(name);
         Self::stop(name).await;
 
         let handle = self.run(name).await?;

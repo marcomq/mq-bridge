@@ -219,7 +219,8 @@ async fn test_postgres_contract() {
 
 /// A plugin endpoint. `MQB_TEST_PLUGIN` lists the libraries like `PATH`, `MQB_TEST_CONTRACT` a JSON object with
 /// `name`, `compose` (file under `docker-compose/`, or empty), `input`, `output` and optionally
-/// `stable_id`, `hop_keeps_id`, `keeps_metadata`, `ordered` set to `false`, and `json: true`.
+/// `stable_id`, `hop_keeps_id`, `keeps_metadata`, `ordered` set to `false`, `json: true`, and
+/// `disposable_input: true` for an input without `$ID` that a check may empty.
 #[cfg(feature = "plugin")]
 #[tokio::test]
 #[ignore = "requires MQB_TEST_PLUGIN and MQB_TEST_CONTRACT"]
@@ -258,6 +259,9 @@ async fn test_plugin_contract() {
     }
     if spec["json"].as_bool() == Some(true) {
         contract = contract.json_payloads();
+    }
+    if spec["disposable_input"].as_bool() == Some(true) {
+        contract = contract.disposable_input();
     }
     check(compose, contract).await;
 }
@@ -368,9 +372,28 @@ async fn test_object_store_contract() {
     use ::object_store::{path::Path, ObjectStore, ObjectStoreExt};
     use futures::TryStreamExt;
 
-    use super::object_store::{ensure_bucket, set_s3_env, BUCKET};
+    use super::object_store::{ensure_bucket, BUCKET, ENDPOINT};
 
-    set_s3_env();
+    if !mq_bridge::test_utils::should_run("object_store") {
+        return;
+    }
+    // The backend is read from the environment, and changing it here would race other threads.
+    if std::env::var("AWS_ENDPOINT").as_deref() != Ok(ENDPOINT) {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--nocapture", "--exact"])
+            .arg("integration::contract::test_object_store_contract")
+            .envs([
+                ("AWS_ACCESS_KEY_ID", "test"),
+                ("AWS_SECRET_ACCESS_KEY", "test"),
+                ("AWS_REGION", "us-east-1"),
+                ("AWS_ENDPOINT", ENDPOINT),
+                ("AWS_ALLOW_HTTP", "true"),
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success(), "the object_store contract failed");
+        return;
+    }
     let output =
         json!({ "object_store": { "url": format!("s3://{BUCKET}/$ID"), "format": "normal" } });
     let contract = Contract::sink_only("object_store", output, |id| async move {
@@ -406,6 +429,7 @@ async fn test_ibm_mq_contract() {
         "channel": "DEV.APP.SVRCONN", "username": "app", "password": "adminpass",
     } });
     let contract = Contract::new("ibm_mq", ibm_mq.clone(), ibm_mq)
+        .disposable_input()
         .id_not_kept()
         .no_metadata()
         .skip(
@@ -427,6 +451,7 @@ async fn test_postgres_cdc_contract() {
         "create_publication": true, "publication_tables": ["contract"], "status_interval_ms": 200 } });
     let output = json!({ "sqlx": { "url": URL, "table": "contract" } });
     let contract = Contract::new("postgres_cdc", input, output)
+        .disposable_input()
         .id_not_kept()
         .no_metadata()
         .setup(|_| async {

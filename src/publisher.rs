@@ -81,6 +81,9 @@ impl Publisher {
     /// Sends a message from a thread outside the runtime and returns once it was accepted.
     /// Fails if this publisher was created outside a Tokio runtime.
     ///
+    /// The publisher holds only a handle, so the runtime it was created on must stay alive
+    /// and be driven: a multi-thread runtime, or a current-thread one inside `block_on`.
+    ///
     /// # Panics
     ///
     /// When called from an async context, as it blocks the thread. Use [`send`](Self::send) there.

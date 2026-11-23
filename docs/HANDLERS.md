@@ -101,8 +101,23 @@ let cancel = handler.cancel_handle();
 # }
 ```
 
-- **`blocking_send` works without a handler.** A `Publisher` keeps the runtime it was created on, so
-  a plain OS thread can send through it.
+- **`blocking_send` works without a handler**, from a plain OS thread. The `Publisher` holds only a
+  handle to the runtime it was created on and does not keep it alive. That runtime must stay alive
+  and be driven until the sending threads finish: use a multi-thread runtime, or keep a
+  current-thread runtime inside `block_on`. Synchronous code keeps the runtime in a variable:
+
+  ```rust,no_run
+  # use mq_bridge::{models::Endpoint, CanonicalMessage, Publisher};
+  # fn main() -> anyhow::Result<()> {
+  let runtime = tokio::runtime::Runtime::new()?;
+  let publisher = runtime.block_on(Publisher::new(Endpoint::new_memory("reports", 1024)))?;
+  let sender = std::thread::spawn(move || publisher.blocking_send(CanonicalMessage::from("ready")));
+  sender.join().expect("the sender panicked")?;
+  drop(runtime);
+  # Ok(())
+  # }
+  ```
+
 - **`blocking_send` returns once the target accepted the message**, so sends from one thread stay in
   order. It panics in an async context. Use `send` there.
 - **`blocking_send` adds no `correlation_id`**, unlike `ctx.emit`, so a cancel does not skip control

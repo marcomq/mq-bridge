@@ -70,6 +70,11 @@ async fn my_endpoint_contract() {
 `$ID` gives each check its own queue, so the checks run in parallel. Without it they run one
 after another on the shared queue. The report lists every check as `ok`, `FAILED` or `skipped`.
 
+A shared queue must be a dedicated test queue. With `disposable_input()`, or
+`"disposable_input": true` in `MQB_TEST_CONTRACT`, the sink-refusal check first reads and acks
+everything the queue holds, so that a leftover cannot hide its message. Without it, nothing is
+drained, and a leftover from an earlier run can fail that check.
+
 Declare only what the transport does not promise: `unordered()`, `unstable_id()`,
 `id_not_kept()`, `no_metadata()`, `json_payloads()`, or `skip(check, reason)`. Use
 `setup` to create a queue and `expire_locks` to end a broker's lease early. A target without

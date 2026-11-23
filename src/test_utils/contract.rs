@@ -246,6 +246,7 @@ pub struct Contract {
     setup: Option<Hook>,
     expire_locks: Option<Hook>,
     read_back: Option<ReadBack>,
+    disposable_input: bool,
     skipped: Vec<(Check, String)>,
 }
 
@@ -272,6 +273,7 @@ impl Contract {
             setup: None,
             expire_locks: None,
             read_back: None,
+            disposable_input: false,
             skipped: Vec::new(),
         }
     }
@@ -363,6 +365,13 @@ impl Contract {
         self
     }
 
+    /// The input without `$ID` is a queue owned by this test: a check may read and ack
+    /// whatever it holds. Never set this on a queue with data you want to keep.
+    pub fn disposable_input(mut self) -> Self {
+        self.disposable_input = true;
+        self
+    }
+
     /// Leaves a check out. The reason appears in the report; link the finding that explains it.
     pub fn skip(mut self, check: Check, reason: impl Into<String>) -> Self {
         self.skipped.push((check, reason.into()));
@@ -371,7 +380,7 @@ impl Contract {
 
     fn isolated(&self) -> bool {
         let has_marker = |value: &serde_json::Value| value.to_string().contains(QUEUE_MARKER);
-        has_marker(&self.output) || self.input.as_ref().is_some_and(has_marker)
+        has_marker(&self.output) && self.input.as_ref().is_none_or(has_marker)
     }
 
     fn skip_reason(&self, check: Check) -> Option<String> {
@@ -407,10 +416,16 @@ impl Contract {
         }
 
         let setup_failure = match (&target.setup, isolated) {
-            (Some(setup), false) => tokio::spawn(setup(String::new()))
-                .await
-                .err()
-                .map(panic_text),
+            (Some(setup), false) => {
+                let setup = Arc::clone(setup);
+                let limit = target.limits.wait * 4;
+                let run = async move { setup(String::new()).await };
+                match tokio::spawn(tokio::time::timeout(limit, run)).await {
+                    Ok(Ok(())) => None,
+                    Ok(Err(_)) => Some(format!("no result within {limit:?}")),
+                    Err(error) => Some(panic_text(error)),
+                }
+            }
             _ => None,
         };
         if let Some(reason) = setup_failure {
@@ -508,9 +523,10 @@ fn bytes(message: &CanonicalMessage) -> Vec<u8> {
         .as_ref()
         .and_then(|row| row["payload"].as_str().or(row["value"]["payload"].as_str()));
     match encoded {
+        // Malformed base64 stays as received, so it can never count as an expected payload.
         Some(encoded) => base64::engine::general_purpose::STANDARD
             .decode(encoded)
-            .unwrap_or_default(),
+            .unwrap_or_else(|_| raw.to_vec()),
         None => raw.to_vec(),
     }
 }
@@ -806,11 +822,11 @@ impl Ctx {
     }
 
     /// Starts sending `payloads` concurrently, so a reader can overlap with the writers.
-    fn send_concurrently(&self, payloads: &[String]) -> tokio::task::JoinHandle<Result<()>> {
+    fn send_concurrently(&self, payloads: &[String]) -> Sending {
         let publisher = Arc::clone(&self.publisher);
         let json_payloads = self.target.json;
         let payloads = payloads.to_vec();
-        tokio::spawn(async move {
+        Sending(tokio::spawn(async move {
             let mut sends = futures::stream::iter(payloads)
                 .map(|payload| {
                     let publisher = Arc::clone(&publisher);
@@ -825,7 +841,7 @@ impl Ctx {
                 sent.map_err(|error| anyhow!("publish: {error}"))?;
             }
             Ok(())
-        })
+        }))
     }
 
     /// Hands each payload the endpoint holds to `visit`, acking it, until `visit` is done.
@@ -871,7 +887,7 @@ impl Ctx {
             })
             .await;
         if seen.len() == wanted.len() {
-            return Ok(());
+            return result;
         }
         let first = payloads.iter().find(|p| !seen.contains(p.as_bytes()));
         let cause = result
@@ -884,6 +900,26 @@ impl Ctx {
             wanted.len(),
             first.map(String::as_str).unwrap_or_default()
         )
+    }
+}
+
+/// A running sender, stopped if its check ends first, so it cannot publish into the next one.
+struct Sending(tokio::task::JoinHandle<Result<()>>);
+
+impl Future for Sending {
+    type Output = Result<Result<()>, tokio::task::JoinError>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        std::pin::Pin::new(&mut self.0).poll(cx)
+    }
+}
+
+impl Drop for Sending {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
@@ -1009,10 +1045,11 @@ async fn check_mixed_acks(ctx: &mut Ctx) -> Result<()> {
             }
             // A log replays from the nack, so a second sighting ends the step.
             let replay = !seen.insert(payload.clone());
+            let done = replay || seen.len() == ids.len();
             if replay || nacked(&payload) {
-                (MessageDisposition::Nack, replay)
+                (MessageDisposition::Nack, done)
             } else {
-                (MessageDisposition::Ack, seen.len() == ids.len())
+                (MessageDisposition::Ack, done)
             }
         })
         .await?;
@@ -1156,21 +1193,25 @@ async fn check_route_stops(ctx: &mut Ctx) -> Result<()> {
         .map_err(|error| anyhow!("route start: {error:?}"))?;
 
     let payload = ctx.labels("route", 1).remove(0);
-    ctx.publish(vec![ctx.message(&payload)]).await?;
-    let deadline = Instant::now() + wait;
-    loop {
-        ensure!(Instant::now() < deadline, "the route delivered nothing");
-        let Ok(Ok(batch)) = tokio::time::timeout(idle, out.receive_batch(16)).await else {
-            continue;
-        };
-        let found = batch.messages.iter().any(|m| text(m) == payload);
-        let acks = vec![MessageDisposition::Ack; batch.messages.len()];
-        (batch.commit)(acks).await?;
-        if found {
-            break;
+    let delivered = async {
+        ctx.publish(vec![ctx.message(&payload)]).await?;
+        let deadline = Instant::now() + wait;
+        loop {
+            ensure!(Instant::now() < deadline, "the route delivered nothing");
+            let Ok(Ok(batch)) = tokio::time::timeout(idle, out.receive_batch(16)).await else {
+                continue;
+            };
+            let found = batch.messages.iter().any(|m| text(m) == payload);
+            let acks = vec![MessageDisposition::Ack; batch.messages.len()];
+            (batch.commit)(acks).await?;
+            if found {
+                return Ok(());
+            }
         }
     }
-    stop_route(handle).await
+    .await;
+    let stopped = stop_route(handle).await;
+    delivered.and(stopped)
 }
 
 async fn stop_route(handle: RouteHandle) -> Result<()> {
@@ -1280,7 +1321,7 @@ fn refusing_sink(tag: &str) -> Result<(Endpoint, Payloads)> {
 /// once the route is stopped.
 async fn check_sink_refuses(ctx: &mut Ctx) -> Result<()> {
     // On a shared log, a leftover at the head would be refused forever and hide the message.
-    if ctx.id.is_empty() {
+    if ctx.id.is_empty() && ctx.target.disposable_input {
         let idle = ctx.target.limits.idle;
         ctx.source()
             .linger(idle, |_| MessageDisposition::Ack)
@@ -1295,14 +1336,19 @@ async fn check_sink_refuses(ctx: &mut Ctx) -> Result<()> {
         .await
         .map_err(|error| anyhow!("route start: {error:?}"))?;
     let payload = ctx.labels("refused", 1).remove(0);
-    ctx.send_in_order(std::slice::from_ref(&payload)).await?;
-    let deadline = Instant::now() + ctx.target.limits.wait;
-    while !seen.lock().unwrap().contains(&payload) {
-        ensure!(Instant::now() < deadline, "the sink was never handed it");
-        tokio::time::sleep(Duration::from_millis(20)).await;
+    let refused = async {
+        ctx.send_in_order(std::slice::from_ref(&payload)).await?;
+        let deadline = Instant::now() + ctx.target.limits.wait;
+        while !seen.lock().unwrap().contains(&payload) {
+            ensure!(Instant::now() < deadline, "the sink was never handed it");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        Ok(())
     }
-    stop_route(handle).await?;
+    .await;
+    let stopped = stop_route(handle).await;
     sinks().lock().unwrap().remove(&label);
+    refused.and(stopped)?;
     ctx.source()
         .read("after the refusal", 16, |message| {
             (MessageDisposition::Ack, text(message) == payload)
@@ -1500,7 +1546,7 @@ async fn check_payload_fidelity(ctx: &mut Ctx) -> Result<()> {
             expected.len()
         );
     }
-    Ok(())
+    result
 }
 
 /// A thousand messages, published in batches, all arrive.

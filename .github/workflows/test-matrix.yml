@@ -55,6 +55,8 @@ jobs:
       
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' }}
       
       - name: Run tests
         run: cargo test --lib --features=full

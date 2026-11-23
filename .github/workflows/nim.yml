@@ -47,6 +47,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           cache-workspace-crates: true
+          save-if: ${{ github.event_name != 'pull_request' }}
 
       - name: Build libmq_bridge
         run: cargo build -p mq-bridge-c --no-default-features

@@ -693,13 +693,27 @@ fn bundled_chat(
 
 /// `answer` for a custom schema written before the bundle's field became `result`.
 fn answer_field(format: Option<&Value>) -> &'static str {
-    let entry = format.and_then(|format| {
-        format.pointer("/json_schema/schema/properties/answers/items/properties")
-    });
+    let entry = format
+        .and_then(|format| format.pointer("/json_schema/schema"))
+        .and_then(|schema| {
+            let answers = local_schema(schema, schema.pointer("/properties/answers")?)?;
+            local_schema(schema, answers.get("items")?)?.get("properties")
+        });
     match entry {
         Some(entry) if entry.get("answer").is_some() && entry.get("result").is_none() => "answer",
         _ => "result",
     }
+}
+
+/// `node`, or what its local `$ref` points to. `None` for a dangling or circular `$ref`.
+fn local_schema<'a>(root: &'a Value, mut node: &'a Value) -> Option<&'a Value> {
+    for _ in 0..8 {
+        let Some(target) = node.get("$ref").and_then(Value::as_str) else {
+            return Some(node);
+        };
+        node = root.pointer(target.strip_prefix('#')?)?;
+    }
+    None
 }
 
 #[cfg(all(test, feature = "plugin", feature = "test-utils"))]
@@ -734,6 +748,20 @@ mod tests {
     }
     use crate::plugin::test_support::StubHttpServer;
     use crate::CanonicalMessage;
+
+    #[test]
+    fn the_answer_field_is_found_through_a_schema_ref() {
+        let format = |entry: Value| {
+            json!({"json_schema": {"schema": {
+                "$defs": {"Entry": {"properties": entry}},
+                "properties": {"answers": {"items": {"$ref": "#/$defs/Entry"}}}
+            }}})
+        };
+        let answer = format(json!({"n": {}, "answer": {}}));
+        assert_eq!(answer_field(Some(&answer)), "answer");
+        let result = format(json!({"n": {}, "result": {}}));
+        assert_eq!(answer_field(Some(&result)), "result");
+    }
 
     fn preset(name: &str) -> Preset {
         PRESETS

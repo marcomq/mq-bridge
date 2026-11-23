@@ -11,7 +11,7 @@
 //!
 //! ```no_run
 //! use mq_bridge::models::Endpoint;
-//! use mq_bridge::{CanonicalMessage, StreamCaller};
+//! use mq_bridge::{CanonicalMessage, StreamCaller, StreamEnd};
 //!
 //! # async fn example() -> anyhow::Result<()> {
 //! let endpoint: Endpoint = serde_json::from_value(serde_json::json!({"openai_chat": {
@@ -26,7 +26,11 @@
 //!
 //! let mut reply = chat.start("turn-7", CanonicalMessage::from("Hello")).await?;
 //! while let Some(token) = reply.next().await {
-//!     print!("{}", token.text());
+//!     match token.end() {
+//!         None => print!("{}", token.text()),
+//!         Some(StreamEnd::Failed) => eprintln!("failed: {}", token.text()),
+//!         Some(_) => println!(),
+//!     }
 //! }
 //! # drop(stop);
 //! # Ok(())
@@ -48,7 +52,7 @@ use crate::traits::{ConsumerError, MessageConsumer, MessageDisposition};
 use crate::{CanonicalMessage, Publisher, Sent};
 use anyhow::Context;
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -74,6 +78,8 @@ pub(crate) const STREAM_REQUEST: &str = "mqb.stream.request";
 const LAST_TOKEN_WAIT: Duration = Duration::from_secs(1);
 const RECONNECT_MIN: Duration = Duration::from_millis(100);
 const RECONNECT_MAX: Duration = Duration::from_secs(5);
+/// Tokens one reply may have waiting; a reader further behind ends with an error.
+const REPLY_BACKLOG: usize = 4096;
 
 /// How an answer ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -189,10 +195,55 @@ impl StreamCancel {
 /// What the token reader hands a reply: a token, or why no more will come.
 type Delivery = Result<StreamToken, String>;
 
+struct OpenReply {
+    request: String,
+    /// `None` once the reply fell too far behind.
+    sender: Option<mpsc::Sender<Delivery>>,
+    /// Token indexes seen per attempt, to drop a redelivery after a failed commit.
+    seen: HashMap<String, HashSet<usize>>,
+}
+
+impl OpenReply {
+    fn new(request: String, sender: mpsc::Sender<Delivery>) -> Self {
+        Self {
+            request,
+            sender: Some(sender),
+            seen: HashMap::new(),
+        }
+    }
+
+    /// Only a token with an attempt and an index has an identity that survives redelivery.
+    fn is_redelivery(&mut self, token: &StreamToken) -> bool {
+        let attempt = token.attempt();
+        if attempt.is_empty() || token.0.get_metadata(STREAM_INDEX).is_none() {
+            return false;
+        }
+        match self.seen.get_mut(attempt) {
+            Some(indexes) => !indexes.insert(token.index()),
+            None => {
+                let indexes = HashSet::from([token.index()]);
+                self.seen.insert(attempt.to_string(), indexes);
+                false
+            }
+        }
+    }
+
+    /// Never waits, so that one slow reply cannot hold up the others.
+    fn deliver(&mut self, token: StreamToken) {
+        if self.is_redelivery(&token) {
+            return;
+        }
+        if let Some(sender) = &self.sender {
+            if sender.try_send(Ok(token)).is_err() {
+                self.sender = None;
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 struct OpenReplies {
-    /// By correlation id: the request's own id and where its tokens go.
-    by_id: HashMap<String, (String, mpsc::UnboundedSender<Delivery>)>,
+    by_id: HashMap<String, OpenReply>,
     closed: Option<String>,
 }
 
@@ -250,8 +301,10 @@ async fn read_tokens(
             (Err(error), _) => {
                 let reason = format!("{error:#}");
                 let mut open = replies.lock().unwrap_or_else(PoisonError::into_inner);
-                for (_, (_, reply)) in open.by_id.drain() {
-                    let _ = reply.send(Err(reason.clone()));
+                for (_, reply) in open.by_id.drain() {
+                    if let Some(sender) = reply.sender {
+                        let _ = sender.try_send(Err(reason.clone()));
+                    }
                 }
                 open.closed = Some(reason);
                 return;
@@ -259,11 +312,11 @@ async fn read_tokens(
         };
         let _ = (received.commit)(MessageDisposition::Ack).await;
         let token = StreamToken(received.message);
-        let open = replies.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some((request, reply)) = open.by_id.get(token.correlation_id()) {
+        let mut open = replies.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(reply) = open.by_id.get_mut(token.correlation_id()) {
             let sent_for = token.0.get_metadata(STREAM_REQUEST);
-            if sent_for.is_none_or(|sent_for| sent_for == request) {
-                let _ = reply.send(Ok(token));
+            if sent_for.is_none_or(|sent_for| sent_for == reply.request) {
+                reply.deliver(token);
             }
         }
     }
@@ -335,7 +388,7 @@ impl StreamCaller {
         correlation_id: &str,
         request: CanonicalMessage,
     ) -> anyhow::Result<StreamReply> {
-        let (sender, tokens) = mpsc::unbounded_channel();
+        let (sender, tokens) = mpsc::channel(REPLY_BACKLOG);
         let request_id = fast_uuid_v7::format_uuid(fast_uuid_v7::gen_id()).to_string();
         {
             // Registered before the request is sent, so that no token can miss its reply.
@@ -349,8 +402,10 @@ impl StreamCaller {
                     self.name
                 );
             }
-            open.by_id
-                .insert(correlation_id.to_string(), (request_id.clone(), sender));
+            open.by_id.insert(
+                correlation_id.to_string(),
+                OpenReply::new(request_id.clone(), sender),
+            );
         }
         let request = request
             .with_metadata_kv(CORRELATION_ID, correlation_id)
@@ -369,6 +424,7 @@ impl StreamCaller {
             failed: None,
             answered: None,
             succeeded: false,
+            server_ended: false,
             ended: false,
         })
     }
@@ -378,7 +434,7 @@ impl StreamCaller {
 pub struct StreamReply {
     name: String,
     reader: Arc<TokenReader>,
-    tokens: mpsc::UnboundedReceiver<Delivery>,
+    tokens: mpsc::Receiver<Delivery>,
     cancels: Option<StreamCancel>,
     answer: JoinHandle<anyhow::Result<Sent>>,
     runtime: tokio::runtime::Handle,
@@ -391,6 +447,8 @@ pub struct StreamReply {
     answered: Option<(String, Instant)>,
     /// The request succeeded, so an `error` token is from an attempt it retried.
     succeeded: bool,
+    /// The server sent the last token, so there is nothing left to cancel.
+    server_ended: bool,
     ended: bool,
 }
 
@@ -414,7 +472,10 @@ impl StreamReply {
                         }
                     }
                     Some(Err(reason)) => return Some(self.end_failed(reason)),
-                    None => return Some(self.end_failed("the token reader stopped".to_string())),
+                    None => {
+                        let reason = self.stop_reason();
+                        return Some(self.end_failed(reason));
+                    }
                 },
                 answer = &mut self.answer, if self.answered.is_none() => {
                     let reason = match answer {
@@ -426,20 +487,35 @@ impl StreamReply {
                         Ok(Err(error)) => format!("{error:#}"),
                         Err(error) => error.to_string(),
                     };
-                    if let Some(failed) = self.failed.take() {
-                        self.ended = true;
-                        return Some(failed);
-                    }
                     self.answered = Some((reason, Instant::now() + LAST_TOKEN_WAIT));
                 }
                 _ = tokio::time::sleep_until(deadline.unwrap_or_else(Instant::now)),
                     if deadline.is_some() =>
                 {
                     let (reason, _) = self.answered.take().expect("the guard checked it");
+                    if let Some(failed) = self.failed.take() {
+                        self.ended = true;
+                        self.server_ended = true;
+                        return Some(failed);
+                    }
                     return Some(self.end_failed(reason));
                 }
             }
         }
+    }
+
+    fn stop_reason(&self) -> String {
+        let open = self.reader.open();
+        if open
+            .by_id
+            .get(&self.id)
+            .is_some_and(|reply| reply.sender.is_none())
+        {
+            return format!("more than {REPLY_BACKLOG} tokens were waiting to be read");
+        }
+        open.closed
+            .clone()
+            .unwrap_or_else(|| "the token reader stopped".to_string())
     }
 
     /// The token to hand out, if any: holds a failed attempt's end.
@@ -454,7 +530,10 @@ impl StreamReply {
         {
             self.failed = None;
         }
-        self.next_index = token.index() + 1;
+        let Some(next_index) = token.index().checked_add(1) else {
+            return Some(self.end_failed("the token index overflowed".to_string()));
+        };
+        self.next_index = next_index;
         match token.end() {
             Some(StreamEnd::Failed) if self.answered.is_none() => {
                 self.failed = Some(token);
@@ -462,6 +541,7 @@ impl StreamReply {
             }
             Some(_) => {
                 self.ended = true;
+                self.server_ended = true;
                 Some(token)
             }
             None => Some(token),
@@ -478,7 +558,7 @@ impl StreamReply {
 impl Drop for StreamReply {
     fn drop(&mut self) {
         self.reader.open().by_id.remove(&self.id);
-        if self.ended || self.answered.is_some() || self.answer.is_finished() {
+        if self.server_ended || self.answered.is_some() || self.answer.is_finished() {
             return;
         }
         if let Some(cancels) = self.cancels.take() {
@@ -820,6 +900,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_redelivered_token_is_handed_out_once() {
+        let piece = in_attempt(StreamToken::piece("t", 0, "once"), "a");
+        let script = vec![
+            piece.clone(),
+            piece,
+            in_attempt(StreamToken::piece("t", 0, "retried"), "b"),
+            in_attempt(StreamToken::last("t", 1, StreamEnd::Complete, ""), "b"),
+        ];
+        let caller = scripted("stream_caller.redelivered", script, false).await;
+        let tokens = read_all(&caller).await;
+        let texts: Vec<_> = tokens.iter().map(|t| t.text().into_owned()).collect();
+        assert_eq!(texts, ["once", "retried", ""]);
+    }
+
+    #[tokio::test]
+    async fn the_highest_token_index_ends_the_reply_as_failed() {
+        let script = vec![StreamToken::piece("t", usize::MAX, "x")];
+        let caller = scripted("stream_caller.max_index", script, false).await;
+        let tokens = read_all(&caller).await;
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].end(), Some(StreamEnd::Failed));
+    }
+
+    #[test]
+    fn a_full_reply_stops_receiving_without_waiting() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let mut reply = OpenReply::new("r".to_string(), sender);
+        reply.deliver(StreamToken::piece("t", 0, "kept"));
+        reply.deliver(StreamToken::piece("t", 1, "over"));
+        assert!(reply.sender.is_none());
+        assert!(receiver.try_recv().unwrap().is_ok());
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn an_id_with_an_open_reply_is_refused() {
         let caller = scripted("stream_caller.twice", Vec::new(), false).await;
         let open = caller
@@ -851,6 +966,7 @@ mod tests {
             let mut buf = [0; 4096];
             while !complete(&request) {
                 let read = socket.read(&mut buf).unwrap();
+                assert_ne!(read, 0, "the connection closed on an incomplete request");
                 request.extend_from_slice(&buf[..read]);
             }
             let events = "data: {\"choices\":[{\"delta\":{\"content\":\"Hal\"}}]}\n\n\

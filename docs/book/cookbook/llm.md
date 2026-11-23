@@ -217,7 +217,11 @@ request dies first:
 let chat = mq_bridge::StreamCaller::new("chat", endpoint).await?;
 let mut reply = chat.start("turn-7", "Hello".into()).await?;
 while let Some(token) = reply.next().await {
-    print!("{}", token.text());
+    match token.end() {
+        None => print!("{}", token.text()),
+        Some(mq_bridge::StreamEnd::Failed) => eprintln!("failed: {}", token.text()),
+        Some(_) => println!(),
+    }
 }
 ```
 

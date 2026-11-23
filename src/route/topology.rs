@@ -83,22 +83,25 @@ impl Topology {
         let stop_order = self.resolved_stop_order();
         let diagram = self.diagram();
 
-        let mut started = HashMap::new();
+        let mut started = StartedRoutes {
+            order: stop_order,
+            deployments: HashMap::new(),
+        };
         for (name, route) in self.routes {
             match route.deploy_tracked(&name).await {
                 Ok(deployment) => {
-                    started.insert(name, deployment);
+                    started.deployments.insert(name, deployment);
                 }
                 Err(source) => {
-                    stop_in_order(&in_stop_order(&stop_order, &started)).await;
+                    stop_in_order(&started.in_stop_order()).await;
+                    started.deployments.clear();
                     return Err(TopologyError::new(&name, source));
                 }
             }
         }
-        Ok(DeployedTopology {
-            routes: in_stop_order(&stop_order, &started),
-            diagram,
-        })
+        let routes = started.in_stop_order();
+        started.deployments.clear();
+        Ok(DeployedTopology { routes, diagram })
     }
 
     fn check(&self) -> Result<(), TopologyError> {
@@ -157,11 +160,31 @@ impl Topology {
     }
 }
 
-fn in_stop_order(order: &[String], started: &HashMap<String, u64>) -> Vec<(String, u64)> {
-    order
-        .iter()
-        .filter_map(|name| Some((name.clone(), *started.get(name)?)))
-        .collect()
+/// The routes a running deploy has started. Stops them if the deploy future is dropped.
+struct StartedRoutes {
+    order: Vec<String>,
+    deployments: HashMap<String, u64>,
+}
+
+impl StartedRoutes {
+    fn in_stop_order(&self) -> Vec<(String, u64)> {
+        self.order
+            .iter()
+            .filter_map(|name| Some((name.clone(), *self.deployments.get(name)?)))
+            .collect()
+    }
+}
+
+impl Drop for StartedRoutes {
+    fn drop(&mut self) {
+        if self.deployments.is_empty() {
+            return;
+        }
+        let routes = self.in_stop_order();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move { stop_in_order(&routes).await });
+        }
+    }
 }
 
 async fn stop_in_order(routes: &[(String, u64)]) {
@@ -302,6 +325,26 @@ mod tests {
 
         assert_eq!(error.route, "topology_broken");
         assert!(Route::get("topology_started").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_deploy_stops_what_it_started() {
+        let name = "topology_cancelled";
+        let deployment = memory_route("topology_cancelled_in")
+            .deploy_tracked(name)
+            .await
+            .unwrap();
+        drop(StartedRoutes {
+            order: vec![name.to_string()],
+            deployments: HashMap::from([(name.to_string(), deployment)]),
+        });
+        for _ in 0..200 {
+            if Route::get(name).is_none() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the started route kept running");
     }
 
     #[tokio::test]

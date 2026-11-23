@@ -12,7 +12,7 @@ use mq_bridge::traits::{MessageConsumer, MessagePublisher};
 use mq_bridge::CanonicalMessage;
 
 pub(super) const BUCKET: &str = "mqb-object-store-test";
-const ENDPOINT: &str = "http://localhost:4566";
+pub(super) const ENDPOINT: &str = "http://localhost:4566";
 
 /// Points the `object_store` crate at LocalStack S3 over plain HTTP.
 pub(super) fn set_s3_env() {

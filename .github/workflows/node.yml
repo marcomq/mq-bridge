@@ -78,6 +78,7 @@ jobs:
           # The binding depends on the engine, which lives in this workspace;
           # without this rust-cache purges it and every run recompiles it.
           cache-workspace-crates: true
+          save-if: ${{ github.event_name != 'pull_request' }}
 
       - name: Install Node dependencies
         working-directory: bindings/node
