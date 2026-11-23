@@ -50,7 +50,8 @@ impl Broker {
     fn accept(&self, mut message: CanonicalMessage) {
         let number = self.sent.fetch_add(1, Ordering::SeqCst) + 1;
         match self.fault {
-            Fault::LosesMessages if number % LOST_EVERY == 0 => return,
+            Fault::LosesMessages if number.is_multiple_of(LOST_EVERY) => return,
+            #[allow(deprecated)]
             Fault::DropsMetadata => message.metadata = Default::default(),
             Fault::CorruptsLargePayloads if message.payload.len() > 1024 => {
                 let mut payload = message.payload.to_vec();
@@ -63,8 +64,10 @@ impl Broker {
     }
 }
 
-fn brokers() -> &'static Mutex<HashMap<(String, String), Arc<Broker>>> {
-    static BROKERS: OnceLock<Mutex<HashMap<(String, String), Arc<Broker>>>> = OnceLock::new();
+type BrokerRegistry = Mutex<HashMap<(String, String), Arc<Broker>>>;
+
+fn brokers() -> &'static BrokerRegistry {
+    static BROKERS: OnceLock<BrokerRegistry> = OnceLock::new();
     BROKERS.get_or_init(Default::default)
 }
 
