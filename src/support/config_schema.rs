@@ -164,6 +164,10 @@ impl FieldType {
         let expected = match self {
             Self::Text => return Ok(Value::String(raw.to_string())),
             Self::Array => {
+                // A list of objects cannot be spelled comma-separated; it comes as JSON.
+                if let Ok(list @ Value::Array(_)) = serde_json::from_str(raw) {
+                    return Ok(list);
+                }
                 let items = raw
                     .split(',')
                     .filter(|entry| !entry.is_empty())
@@ -831,6 +835,11 @@ mod tests {
         assert_eq!(config["acks"], json!(0.5));
         assert_eq!(config["brokers"], json!(["a", "b"]));
         assert_eq!(config["partitions"], json!([0, 1]));
+
+        let config = UriSchema::from_schema(&connect_schema())
+            .config_from_uri(r#"rp://host/t?brokers=[{"a":1},{"b":2}]"#)
+            .expect("map the uri");
+        assert_eq!(config["brokers"], json!([{"a": 1}, {"b": 2}]));
     }
 
     /// Passing `"abc"` on to a plugin expecting an integer buries the mistake in

@@ -55,6 +55,8 @@ ends when its source is empty if the route has `exit_on_empty`, so there is no c
 | `http_bulk` | yes | yes |
 | `ibmmq` | yes | yes |
 | `kafka` | yes | yes |
+| `llm_agent` | no | yes |
+| `llm_hosted_agent` | no | yes |
 | `meilisearch` | yes | yes |
 | `memory` | yes | yes |
 | `mongodb` | yes | yes |
@@ -131,6 +133,8 @@ ends when its source is empty if the route has `exit_on_empty`, so there is no c
 | `http_bulk` | depends | with `operation` | Replies with `query` set; with `query.stream_to` each token is sent there first. |
 | `ibmmq` | no | no |  |
 | `kafka` | no | no |  |
+| `llm_agent` | yes | no | The reply is the final answer; mq-bridge runs the tool and MCP calls. |
+| `llm_hosted_agent` | yes | no | The reply is the final answer; the provider runs the tool and MCP calls. |
 | `meilisearch` | no | with `operation` |  |
 | `memory` | with `request_reply: true` | no |  |
 | `mongodb` | depends | no | Replies with `request_reply`, `report_outcome`, `find` or `aggregate_query`. |
@@ -172,6 +176,8 @@ ends when its source is empty if the route has `exit_on_empty`, so there is no c
 | `http_bulk` | `tls` block | `auth` and custom headers. |
 | `ibmmq` | `tls` block | Its own `tls` block (`cipher_spec`, key repository). User and password. |
 | `kafka` | `tls` block | SASL user and password; they force `sasl_ssl`. |
+| `llm_agent` | `tls` block | API key; MCP server tokens; `command` starts a local process. |
+| `llm_hosted_agent` | `tls` block | API key; MCP server tokens. |
 | `meilisearch` | `tls` block | API key. |
 | `memory` | – | In-process, or a local socket that checks the peer's user id. |
 | `mongodb` | `tls` block | TLS and credentials can also be set in the URL (`tls=true`, `tlsCAFile=`). |

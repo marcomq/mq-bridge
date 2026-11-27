@@ -6,6 +6,20 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Added
 
+- **`llm_hosted_agent` endpoint: the provider runs the tool and MCP loop.** One request per message to
+  OpenAI's Responses API (also Azure, xAI, etc) or Anthropic's Messages API with its MCP
+  connector; `mcp_servers` lists the remote servers the model may call. The answer is the final
+  text, or with `answer: full` the whole response. A failed, incomplete or refused response fails
+  its message. Amazon Bedrock Agents is not supported; Bedrock models work through `openai_chat`
+  and `llm_agent`.
+- **`llm_agent` endpoint: mq-bridge runs the tool loop itself.** Tools are endpoints that answer
+  (`tools`) or the tools of MCP servers, over Streamable HTTP (`url`) or as a local process over
+  stdio (`command`). Speaks the OpenAI Responses API, Anthropic Messages and Chat Completions
+  (Ollama, vLLM, Groq, Bedrock, the Gemini and Cohere compatibility APIs). The history stays in
+  the provider's format, so reasoning and thinking blocks go back unchanged. A failing tool
+  answers the model with an error; `max_rounds` bounds the loop; the answer carries
+  `llm_rounds` and token counts. Feature `llm-agent` (rmcp 3.12 as MCP client), in the full
+  plugin. The app's MCP server moves to rmcp 3.12 as well.
 - **`Bridge`: named instances for embedding applications.** Routes, publishers, callers, `ref`
   endpoints and in-process topics get their own namespace, so two parts of an application can
   use the same names. An optional `PolicyHook` approves every endpoint, nested ones included,

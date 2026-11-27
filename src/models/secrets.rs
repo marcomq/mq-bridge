@@ -400,6 +400,12 @@ impl SecretExtractor for EndpointType {
             EndpointType::OpenAiChat(cfg) => {
                 cfg.extract_secrets(&format!("{prefix}__OPENAI_CHAT"), secrets)
             }
+            EndpointType::LlmHostedAgent(cfg) => {
+                cfg.extract_secrets(&format!("{prefix}__LLM_HOSTED_AGENT"), secrets)
+            }
+            EndpointType::LlmAgent(cfg) => {
+                cfg.extract_secrets(&format!("{prefix}__LLM_AGENT"), secrets)
+            }
             EndpointType::OpenAiEmbeddings(cfg) => {
                 cfg.extract_secrets(&format!("{prefix}__OPENAI_EMBEDDINGS"), secrets)
             }
@@ -687,6 +693,38 @@ named_endpoint_secrets! {
     OpenAiEmbeddingsConfig { api_key }
     QdrantConfig { api_key, checkpoint_store }
     TypesenseConfig { api_key }
+}
+
+impl SecretExtractor for LlmHostedAgentConfig {
+    fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
+        take_secret(secrets, prefix, "API_KEY", &mut self.api_key);
+        for (i, server) in self.mcp_servers.iter_mut().enumerate() {
+            take_secret(
+                secrets,
+                &format!("{prefix}__MCP_SERVERS__{i}"),
+                "TOKEN",
+                &mut server.token,
+            );
+        }
+    }
+}
+
+impl SecretExtractor for LlmAgentConfig {
+    fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
+        take_secret(secrets, prefix, "API_KEY", &mut self.api_key);
+        for (i, tool) in self.tools.iter_mut().enumerate() {
+            tool.endpoint
+                .extract_secrets(&format!("{prefix}__TOOLS__{i}__ENDPOINT"), secrets);
+        }
+        for (i, server) in self.mcp_servers.iter_mut().enumerate() {
+            take_secret(
+                secrets,
+                &format!("{prefix}__MCP_SERVERS__{i}"),
+                "TOKEN",
+                &mut server.token,
+            );
+        }
+    }
 }
 
 impl SecretExtractor for OpenAiChatConfig {

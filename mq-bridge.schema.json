@@ -407,6 +407,28 @@
         {
           "type": "object",
           "properties": {
+            "llm_hosted_agent": {
+              "$ref": "#/$defs/LlmHostedAgentConfig"
+            }
+          },
+          "required": [
+            "llm_hosted_agent"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "llm_agent": {
+              "$ref": "#/$defs/LlmAgentConfig"
+            }
+          },
+          "required": [
+            "llm_agent"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
             "openai_embeddings": {
               "$ref": "#/$defs/OpenAiEmbeddingsConfig"
             }
@@ -6438,6 +6460,419 @@
       "additionalProperties": false,
       "required": [
         "model"
+      ]
+    },
+    "LlmHostedAgentConfig": {
+      "title": "Hosted LLM agent",
+      "description": "The `llm_hosted_agent` endpoint: one request per message; the provider runs the tool and MCP loop.",
+      "type": "object",
+      "properties": {
+        "provider": {
+          "description": "`openai` (Responses API) or `anthropic` (Messages API).",
+          "$ref": "#/$defs/LlmHostedProvider",
+          "default": "openai"
+        },
+        "url": {
+          "description": "Base URL of the API. Defaults to `https://api.openai.com/v1` or `https://api.anthropic.com/v1`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-mqb-uri": "url"
+        },
+        "api_key": {
+          "description": "API key of the provider.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "password"
+        },
+        "model": {
+          "description": "Model name, e.g. `gpt-5-mini` or `claude-sonnet-5-5`.",
+          "type": "string"
+        },
+        "system": {
+          "description": "Template of the instructions (system prompt).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prompt": {
+          "description": "Template of the user input, e.g. `Triage: ${payload:body}`.",
+          "type": "string",
+          "default": ""
+        },
+        "messages_from_payload": {
+          "description": "The payload is the `input` (openai) or `messages` (anthropic) array itself.",
+          "type": "boolean",
+          "default": false
+        },
+        "mcp_servers": {
+          "description": "MCP servers the provider may call.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LlmHostedMcpServer"
+          }
+        },
+        "max_tokens": {
+          "description": "Most tokens of one answer. Anthropic requires it; defaults to 16000 there.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "json": {
+          "description": "Parse the answer as JSON; openai is also asked for a JSON object.",
+          "type": "boolean",
+          "default": false
+        },
+        "answer": {
+          "description": "`text` (default) or `full`, the whole response with its tool calls.",
+          "$ref": "#/$defs/LlmAnswer",
+          "default": "text"
+        },
+        "options": {
+          "description": "Further request fields, e.g. `{\"temperature\": 0}`; `tools` adds to the MCP ones; JSON in a URI."
+        },
+        "concurrency": {
+          "description": "Requests in flight for one batch sent to this endpoint. Defaults to 8.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "request_timeout_ms": {
+          "description": "Request timeout in milliseconds. Unset = 300 s without a response byte; `0` = none.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "tls": {
+          "description": "TLS options as on `http_bulk` (`ca_file`, `cert_file`, `key_file`, `required`); JSON in a URI."
+        },
+        "auth": {
+          "description": "`oauth2` or `aws_sigv4` credentials, as on `http_bulk`; JSON in a URI."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "model"
+      ]
+    },
+    "LlmHostedProvider": {
+      "description": "The API an `llm_hosted_agent` talks to.",
+      "oneOf": [
+        {
+          "description": "The OpenAI Responses API, also served by e.g. Azure, xAI and Groq.",
+          "type": "string",
+          "const": "openai"
+        },
+        {
+          "description": "The Anthropic Messages API with its MCP connector.",
+          "type": "string",
+          "const": "anthropic"
+        }
+      ]
+    },
+    "LlmHostedMcpServer": {
+      "description": "A remote MCP server the provider calls on the agent's behalf.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Label of the server, unique within the endpoint.",
+          "type": "string"
+        },
+        "url": {
+          "description": "URL the provider reaches the server at.",
+          "type": "string"
+        },
+        "token": {
+          "description": "Bearer token the provider sends to the server.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "password"
+        },
+        "allowed_tools": {
+          "description": "Tools the model may call. Unset = all.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "url"
+      ]
+    },
+    "LlmAnswer": {
+      "description": "What an `llm_hosted_agent` answers with.",
+      "oneOf": [
+        {
+          "description": "The final text of the response.",
+          "type": "string",
+          "const": "text"
+        },
+        {
+          "description": "The whole response, with every tool call.",
+          "type": "string",
+          "const": "full"
+        }
+      ]
+    },
+    "LlmAgentConfig": {
+      "title": "LLM agent",
+      "description": "The `llm_agent` endpoint: mq-bridge runs the tool loop, calling endpoints and MCP servers itself.",
+      "type": "object",
+      "properties": {
+        "provider": {
+          "description": "`openai` (Responses API), `anthropic` or `openai_chat` (Chat Completions).",
+          "$ref": "#/$defs/LlmProvider",
+          "default": "openai"
+        },
+        "url": {
+          "description": "Base URL of the API. Defaults to `https://api.openai.com/v1` or `https://api.anthropic.com/v1`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-mqb-uri": "url"
+        },
+        "api_key": {
+          "description": "API key of the provider.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "password"
+        },
+        "model": {
+          "description": "Model name, e.g. `gpt-5-mini` or `claude-sonnet-5-5`.",
+          "type": "string"
+        },
+        "system": {
+          "description": "Template of the instructions (system prompt).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prompt": {
+          "description": "Template of the user input, e.g. `Triage: ${payload:body}`.",
+          "type": "string",
+          "default": ""
+        },
+        "messages_from_payload": {
+          "description": "The payload is the provider's message array itself.",
+          "type": "boolean",
+          "default": false
+        },
+        "tools": {
+          "description": "Endpoints the model may call as tools.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LlmTool"
+          }
+        },
+        "mcp_servers": {
+          "description": "MCP servers whose tools the model may call.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LlmMcpServer"
+          }
+        },
+        "max_rounds": {
+          "description": "Most model calls for one message; then it fails. Defaults to 8.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "tool_concurrency": {
+          "description": "Tool calls of one round run at once. Defaults to 4.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "max_tokens": {
+          "description": "Most tokens of one answer. Anthropic requires it; defaults to 16000 there.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "json": {
+          "description": "Parse the answer as JSON; openai and openai_chat are also asked for a JSON object.",
+          "type": "boolean",
+          "default": false
+        },
+        "answer": {
+          "description": "`text` (default) or `full`, the whole conversation.",
+          "$ref": "#/$defs/LlmAnswer",
+          "default": "text"
+        },
+        "options": {
+          "description": "Further request fields, e.g. `{\"temperature\": 0}`; JSON in a URI."
+        },
+        "concurrency": {
+          "description": "Messages of one batch handled at once. Defaults to 8.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "request_timeout_ms": {
+          "description": "Request timeout in milliseconds. Unset = 300 s without a response byte; `0` = none.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "tls": {
+          "description": "TLS options as on `http_bulk` (`ca_file`, `cert_file`, `key_file`, `required`); JSON in a URI."
+        },
+        "auth": {
+          "description": "`oauth2` or `aws_sigv4` credentials, as on `http_bulk`; JSON in a URI."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "model"
+      ]
+    },
+    "LlmProvider": {
+      "description": "The API an `llm_agent` talks to.",
+      "oneOf": [
+        {
+          "description": "The OpenAI Responses API.",
+          "type": "string",
+          "const": "openai"
+        },
+        {
+          "description": "The Anthropic Messages API.",
+          "type": "string",
+          "const": "anthropic"
+        },
+        {
+          "description": "Chat Completions, e.g. Ollama, vLLM, Groq or the Gemini and Cohere compatibility APIs.",
+          "type": "string",
+          "const": "openai_chat"
+        }
+      ]
+    },
+    "LlmTool": {
+      "description": "A tool the model may call: its arguments go to `endpoint`, whose answer is the result.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Name the model calls the tool by.",
+          "type": "string"
+        },
+        "description": {
+          "description": "What the tool does, for the model.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "schema": {
+          "description": "JSON schema of the arguments. Unset = any object."
+        },
+        "endpoint": {
+          "description": "Endpoint that gets the arguments as payload and answers, e.g. an `http` request.",
+          "$ref": "#/$defs/Endpoint"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "endpoint"
+      ]
+    },
+    "LlmMcpServer": {
+      "description": "An MCP server mq-bridge calls: `url` (Streamable HTTP) or `command` (a local process over stdio).",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Label of the server, used in messages.",
+          "type": "string"
+        },
+        "url": {
+          "description": "URL of a Streamable HTTP server.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "token": {
+          "description": "Bearer token sent to the `url` server.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "password"
+        },
+        "command": {
+          "description": "Program to start, e.g. `npx`; it speaks MCP on stdin and stdout.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "args": {
+          "description": "Arguments of `command`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "env": {
+          "description": "Environment variables set for `command`.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "allowed_tools": {
+          "description": "Tools the model may call. Unset = all.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name"
       ]
     },
     "OpenAiEmbeddingsConfig": {

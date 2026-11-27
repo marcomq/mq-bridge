@@ -2110,6 +2110,15 @@ mod tests {
                 serde_json::json!(true),
             ),
             (
+                r#"llm-hosted-agent+https://api.anthropic.com?provider=anthropic&model=m&prompt=Hi&mcp_servers=[{"name":"d","url":"https://mcp.example"}]"#,
+                "llm_hosted_agent",
+                "https://api.anthropic.com",
+                "mcp_servers",
+                serde_json::json!([
+                    {"name": "d", "url": "https://mcp.example", "token": null, "allowed_tools": null}
+                ]),
+            ),
+            (
                 "openai-embeddings+https://llm.example.com/v1?model=m&input=x&dimensions=8",
                 "openai_embeddings",
                 "https://llm.example.com/v1",
@@ -2122,6 +2131,15 @@ mod tests {
             assert_eq!(found, name);
             assert_eq!(config["url"], url);
             assert_eq!(config[field], value, "{uri}");
+        }
+        #[cfg(feature = "llm-agent")]
+        {
+            let uri = r#"llm-agent+http://localhost:11434?provider=openai_chat&model=m&prompt=Hi&mcp_servers=[{"name":"f","command":"npx"}]"#;
+            let (found, config) = named(&endpoint_from_uri(uri).unwrap());
+            assert_eq!(found, "llm_agent");
+            assert_eq!(config["url"], "http://localhost:11434");
+            assert_eq!(config["provider"], "openai_chat");
+            assert_eq!(config["mcp_servers"][0]["command"], "npx");
         }
         let uri = r#"openai://h?model=m&prompt=Hi&stream_to={"memory":{"topic":"t"}}"#;
         let endpoint = endpoint_from_uri(uri).unwrap();
@@ -2150,6 +2168,8 @@ mod tests {
             "qdrant",
             "openai_chat",
             "openai_embeddings",
+            "llm_hosted_agent",
+            "llm_agent",
         ] {
             if mq_bridge::extensions::get_endpoint_factory(name).is_some() {
                 assert!(

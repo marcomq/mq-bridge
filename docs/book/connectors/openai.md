@@ -2,14 +2,16 @@
 
 Two endpoints call an API that speaks the OpenAI wire format: OpenAI itself,
 and the servers that copied it, such as Ollama, vLLM, LM Studio, Groq and
-Mistral.
+Mistral. A third, `llm_hosted_agent`, calls an API that runs tools and MCP servers
+itself: OpenAI's Responses API or Anthropic's Messages API.
 
 | Endpoint | Calls | Requests |
 |---|---|---|
 | [`openai_chat`](#openai_chat) | `/chat/completions` | one per message, or one per `messages_per_request` |
 | [`openai_embeddings`](#openai_embeddings) | `/embeddings` | one per batch |
+| [`llm_hosted_agent`](#llm_hosted_agent) | `/responses` or `/messages` | one per message |
 
-Both answer; they write nothing. Use them as the `from` of a
+All of them answer; they write nothing. Use them as the `from` of a
 [`lookup`](../cookbook/lookup.md), which puts the answer into the message, or
 as the `to` of a [`request`](../engine/reference.md#request) endpoint, which
 forwards the answer. Recipes are in the [LLM cookbook](../cookbook/llm.md).
@@ -318,6 +320,141 @@ on the [Qdrant](./qdrant.md) page. On the command line the scheme is
 | `tls` | none | TLS options as on [`http_bulk`](http-bulk.md). JSON text in a URI |
 | `auth` | none | `oauth2` or `aws_sigv4` credentials as on [`http_bulk`](http-bulk.md#authentication), in place of `api_key`. JSON text in a URI |
 
+## `llm_hosted_agent`
+
+Sends one request per message to an API that runs the agent loop itself: the
+model calls tools and remote MCP servers on the provider's side, and
+mq-bridge gets the final answer. mq-bridge runs no loop and calls no tool.
+
+```yaml
+output:
+  request:
+    to:
+      llm_hosted_agent:
+        provider: openai                        # or anthropic
+        api_key: "${env:OPENAI_API_KEY}"
+        model: gpt-5-mini
+        system: "Answer from the documentation only."
+        prompt: "${payload:question}"
+        mcp_servers:
+          - name: docs
+            url: https://developers.openai.com/mcp
+    forward_to: { file: { path: "answers.jsonl", format: payload } }
+```
+
+| `provider` | API | Also serves |
+|---|---|---|
+| `openai` (default) | `POST /responses` with `type: mcp` tools | Azure OpenAI, xAI, Groq: set `url` |
+| `anthropic` | `POST /messages` with the MCP connector (`anthropic-beta: mcp-client-2025-11-20`) | |
+
+Amazon Bedrock Agents is not a `provider`: an agent and its tools (Lambda action groups)
+are set up in AWS beforehand, and its answer is a binary AWS event stream, not one JSON
+response. Bedrock models still work through `openai_chat` and through `llm_agent` with
+`provider: openai_chat`, see [Amazon Bedrock](#amazon-bedrock).
+
+The answer is the text of the last `message` item (openai) or the text blocks
+after the last tool result (anthropic). A message fails for good when the
+response is `failed` or `incomplete`, stops with `refusal`, `pause_turn` or
+`max_tokens`, has no text, asks to approve an MCP call, or calls a function
+tool of `options.tools`, which mq-bridge does not run. mq-bridge sets
+`require_approval: never` on every MCP server of `openai`; with
+`answer: full` the whole response is the answer, tool calls included, and none
+of these checks run.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `provider` | `openai` | `openai` or `anthropic` |
+| `url` | `https://api.openai.com/v1`, `https://api.anthropic.com/v1` | Base URL; one without a path gets `/v1`. `llm-hosted-agent://host` is plain HTTP |
+| `api_key` | none | `Authorization: Bearer` (openai) or `x-api-key` (anthropic) |
+| `model` | required | Model name |
+| `system` | none | Template of the instructions |
+| `prompt` | required | Template of the user input |
+| `messages_from_payload` | `false` | The payload is the `input` (openai) or `messages` (anthropic) array, in place of `prompt` |
+| `mcp_servers` | none | List of `{name, url, token, allowed_tools}`; `token` is the bearer token the provider sends to the server |
+| `max_tokens` | `16000` for anthropic | Most tokens of one answer |
+| `json` | `false` | Parse the answer as JSON; openai is also asked for a JSON object |
+| `answer` | `text` | `full`: the whole response |
+| `options` | none | Further request fields, e.g. `{temperature: 0}`; `tools` is added to the MCP tools. JSON text in a URI |
+| `concurrency` | 8 | Requests in flight for one batch |
+| `request_timeout_ms` | see `openai_embeddings` | Timeout of one request |
+| `tls`, `auth` | none | As on [`http_bulk`](http-bulk.md) |
+
+The MCP servers must be reachable from the provider, not from mq-bridge. A
+local model has no such loop; to try the endpoint without a key, point `url`
+at a stub server. On the command line the scheme is `llm-hosted-agent://`, with
+`mcp_servers` as JSON text:
+`llm-hosted-agent+https://api.anthropic.com?provider=anthropic&model=…&prompt=…&mcp_servers=[{"name":"docs","url":"https://…"}]`.
+
+## `llm_agent`
+
+`llm_agent` runs the tool loop in mq-bridge: it asks the model, calls the tools the
+model asks for, hands the results back and asks again, until the model answers
+without a tool call. A tool is an endpoint that answers, such as an `http` request or
+a `lookup`-able database, or a tool of an MCP server, reached over Streamable HTTP
+(`url`) or started as a local process that speaks MCP on stdin and stdout (`command`).
+Unlike `llm_hosted_agent`, the tools need not be reachable from the provider, and any
+model with tool calls works. It needs a build with the `llm-agent` feature (in the full
+plugin).
+
+```yaml
+output:
+  request:
+    to:
+      llm_agent:
+        provider: openai_chat                 # or openai, anthropic
+        url: http://localhost:11434           # Ollama
+        model: qwen3:8b
+        system: "Answer from the order system only."
+        prompt: "${payload:question}"
+        max_rounds: 8
+        tools:
+          - name: get_order
+            description: "Looks up an order by its id"
+            schema: { type: object, properties: { id: { type: string } }, required: [id] }
+            endpoint: { http: { url: "http://orders.internal/api/lookup" } }
+        mcp_servers:
+          - name: docs
+            url: https://developers.openai.com/mcp
+          - name: files
+            command: npx
+            args: ["-y", "@modelcontextprotocol/server-filesystem", "/srv/docs"]
+            allowed_tools: [read_text_file, search_files]
+    forward_to: { file: { path: "answers.jsonl", format: payload } }
+```
+
+| `provider` | API | Also serves |
+|---|---|---|
+| `openai` (default) | `POST /responses` | Azure OpenAI, xAI, Groq: set `url` |
+| `anthropic` | `POST /messages` | |
+| `openai_chat` | `POST /chat/completions` | Ollama, vLLM, Groq, Mistral, DeepSeek, Bedrock; Gemini at `https://generativelanguage.googleapis.com/v1beta/openai`, Cohere at `https://api.cohere.ai/compatibility/v1` |
+
+The Gemini and Cohere compatibility APIs were checked for their configuration only, not
+run.
+
+An endpoint tool gets the call's arguments as its JSON payload; its answer is the
+result. An MCP tool is called with the arguments; the text parts of its result are the
+result. Tool names must be unique across all tools and servers. Each round sends the
+whole conversation in the provider's own format, so reasoning items, thinking blocks
+and their signatures go back unchanged.
+
+| What happens | Outcome |
+|---|---|
+| A tool fails for good, is unknown, or gets arguments that are not a JSON object | The error goes back to the model as the tool's result; the loop goes on |
+| A tool fails retryably (connection lost) | The message fails retryably; a retry runs the whole loop again |
+| A tool's endpoint gives no answer | The message fails for good |
+| The model stops with `refusal`, `max_tokens`/`length` or no text | The message fails for good |
+| `max_rounds` model calls and still tool calls | The message fails for good |
+
+Because a retry starts the conversation over, a tool that writes should be idempotent.
+The answer is the final text (parsed with `json: true`), or with `answer: full` the whole
+conversation as a JSON array. It carries `llm_rounds`, `llm_input_tokens` and
+`llm_output_tokens` as metadata. `options.tools` adds provider tools, such as
+`web_search`, that the provider runs itself.
+
+`command` starts a program from the configuration, with the rights of mq-bridge. Accept
+it only from configurations you trust; a route started through the app's MCP server can
+carry one too.
+
 ## Amazon Bedrock
 
 Bedrock serves the chat completions API at
@@ -338,12 +475,15 @@ output:
     forward_to: { file: { path: "summaries.jsonl", format: payload } }
 ```
 
+`llm_agent` takes the same `url` and `auth` with `provider: openai_chat`, so mq-bridge runs
+the tool loop against a Bedrock model.
+
 This was checked for its configuration only, not run against Bedrock.
 
 ## From Rust
 
-`OpenAiChatConfig` and `OpenAiEmbeddingsConfig` are the typed forms of the
-tables above. Either converts into an `Endpoint`; it needs the `http-bulk`
+`OpenAiChatConfig`, `OpenAiEmbeddingsConfig` and `LlmHostedAgentConfig` are the typed forms of the
+tables above. Each converts into an `Endpoint`; it needs the `http-bulk`
 feature and no registration.
 
 ```rust

@@ -6,6 +6,10 @@
 //! Named endpoints that are an `http_bulk` configuration: a few fields and a
 //! URI of their own, and the generic publisher underneath.
 
+#[cfg(feature = "llm-agent")]
+mod llm_agent;
+mod llm_hosted_agent;
+
 use super::query::INPUT_COUNT;
 use super::stream_query::StreamQueryPublisher;
 use super::{HttpBulkConsumer, HttpBulkPublisher};
@@ -31,11 +35,16 @@ struct Preset {
     resolve: fn(&str, &Value) -> anyhow::Result<Value>,
 }
 
-const PRESETS: [Preset; 6] = [
+const PRESETS: [Preset; 7] = [
     Preset {
         name: "elasticsearch",
         schema: derived::<ElasticsearchConfig>(),
         resolve: elasticsearch,
+    },
+    Preset {
+        name: "llm_hosted_agent",
+        schema: derived::<crate::models::LlmHostedAgentConfig>(),
+        resolve: llm_hosted_agent::resolve,
     },
     Preset {
         name: "meilisearch",
@@ -64,18 +73,24 @@ const PRESETS: [Preset; 6] = [
     },
 ];
 
+/// Named endpoints that are not one `http_bulk` configuration, but run on one.
+const OWN_FACTORIES: &[&str] = &[
+    #[cfg(feature = "llm-agent")]
+    "llm_agent",
+];
+
 /// The endpoint names [`register_preset`] accepts.
 pub fn preset_names() -> impl Iterator<Item = &'static str> {
-    PRESETS.iter().map(|preset| preset.name)
+    PRESETS
+        .iter()
+        .map(|preset| preset.name)
+        .chain(OWN_FACTORIES.iter().copied())
 }
 
 /// Registers the named endpoint, e.g. `typesense`, as a custom endpoint factory.
 pub fn register_preset(name: &str) -> anyhow::Result<()> {
-    let preset = PRESETS
-        .into_iter()
-        .find(|preset| preset.name == name)
-        .ok_or_else(|| anyhow!("no http_bulk preset is named `{name}`"))?;
-    crate::extensions::register_endpoint_factory(name, Arc::new(preset))
+    let factory = builtin(name).ok_or_else(|| anyhow!("no http_bulk preset is named `{name}`"))?;
+    crate::extensions::register_endpoint_factory(name, factory)
 }
 
 /// Registers a named endpoint of your own as a custom endpoint factory.
@@ -97,6 +112,10 @@ pub fn register_preset_with(
 
 /// The built-in named endpoint, for a route that names one nobody registered.
 pub(crate) fn builtin(name: &str) -> Option<Arc<dyn CustomEndpointFactory>> {
+    #[cfg(feature = "llm-agent")]
+    if name == "llm_agent" {
+        return Some(Arc::new(llm_agent::LlmAgentFactory));
+    }
     let preset = PRESETS.into_iter().find(|preset| preset.name == name)?;
     Some(Arc::new(preset))
 }
@@ -176,7 +195,13 @@ impl CustomEndpointFactory for Preset {
                 StreamQueryPublisher::new(route_name, &resolved).await?,
             ));
         }
-        Ok(Box::new(HttpBulkPublisher::new(&resolved)?))
+        let publisher = HttpBulkPublisher::new(&resolved)?;
+        if self.name == "llm_hosted_agent" {
+            return Ok(Box::new(llm_hosted_agent::LlmHostedAgentPublisher::new(
+                publisher, config,
+            )?));
+        }
+        Ok(Box::new(publisher))
     }
 
     fn config_schema(&self) -> Option<Value> {
@@ -791,6 +816,7 @@ mod tests {
             ("qdrant", json!({"collection": "books"})),
             ("openai_chat", json!({"model": "m", "prompt": "p"})),
             ("openai_embeddings", json!({"model": "m", "input": "i"})),
+            ("llm_hosted_agent", json!({"model": "m", "prompt": "p"})),
         ] {
             // A scheme cannot hold `_`, so the URI of `openai_embeddings` spells it with `-`.
             let scheme = name.replace('_', "-");
@@ -985,6 +1011,23 @@ mod tests {
                 json!({"model": "m", "prompt": "p", "concurrency": 0}),
             ),
             ("openai_embeddings", json!({"model": "m"})),
+            ("llm_hosted_agent", json!({"model": "m"})),
+            (
+                "llm_hosted_agent",
+                json!({"model": "m", "prompt": "p", "options": {"input": "x"}}),
+            ),
+            (
+                "llm_hosted_agent",
+                json!({"model": "m", "prompt": "p", "provider": "anthropic", "options": {"system": "x"}}),
+            ),
+            (
+                "llm_hosted_agent",
+                json!({"model": "m", "prompt": "p", "options": {"tools": {}}}),
+            ),
+            (
+                "llm_hosted_agent",
+                json!({"model": "m", "prompt": "p", "provider": "bedrock"}),
+            ),
             (
                 "openai_embeddings",
                 json!({"model": "m", "input": "i", "url": "ftp://h"}),
@@ -1034,7 +1077,7 @@ mod tests {
     #[tokio::test]
     async fn every_preset_declares_a_uri_and_only_two_are_inputs() {
         for name in preset_names() {
-            let preset = preset(name);
+            let preset = builtin(name).expect("built in");
             #[cfg(feature = "schema")]
             {
                 let schema = preset.config_schema().expect("schema");
@@ -1045,7 +1088,7 @@ mod tests {
             }
             let config = match name {
                 "typesense" | "qdrant" => json!({"url": "http://localhost:1", "collection": "a"}),
-                "openai_chat" => json!({"model": "m", "prompt": "p"}),
+                "openai_chat" | "llm_hosted_agent" => json!({"model": "m", "prompt": "p"}),
                 "openai_embeddings" => json!({"model": "m", "input": "i"}),
                 _ => json!({"url": "http://localhost:1", "index": "a"}),
             };

@@ -961,6 +961,8 @@ mod tests {
         "sled",
         "pulsar",
         "elasticsearch",
+        "llm_agent",
+        "llm_hosted_agent",
         "meilisearch",
         "openai_chat",
         "openai_embeddings",

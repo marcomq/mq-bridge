@@ -517,7 +517,7 @@ export interface MongoDbConfig {
   report_outcome?: boolean;
   find?: string | null;
   aggregate_query?: string | null;
-  load_mode?: SqlLoadMode | null;
+  load_mode?: "replace" | null;
   cursor_id?: string | null;
   meta_collection?: string | null;
   shared?: boolean | null;
@@ -526,8 +526,6 @@ export interface MongoDbConfig {
 export type MongoConsume = "delete" | "snapshot" | "capture_new" | "capture_all";
 
 export type MongoDbFormat = "normal" | "json" | "text" | "raw" | "envelope" | "envelope_json" | "envelope_text" | "payload";
-
-export type SqlLoadMode = "atomic_append" | "replace";
 
 export interface MqttConfig {
   url: string;
@@ -725,6 +723,8 @@ export interface SqlxConfig {
 }
 
 export type SqlColumns = "auto";
+
+export type SqlLoadMode = "atomic_append" | "replace";
 
 export type SqlTimestamps = "text" | "rfc3339";
 
@@ -980,6 +980,77 @@ export interface OpenAiChatConfig {
   auth?: unknown;
   stream_to?: Endpoint | null;
   cancel_from?: Endpoint | null;
+}
+
+export interface LlmHostedAgentConfig {
+  provider?: LlmHostedProvider;
+  url?: string | null;
+  api_key?: string | null;
+  model: string;
+  system?: string | null;
+  prompt?: string;
+  messages_from_payload?: boolean;
+  mcp_servers?: LlmHostedMcpServer[];
+  max_tokens?: number | null;
+  json?: boolean;
+  answer?: LlmAnswer;
+  options?: unknown;
+  concurrency?: number | null;
+  request_timeout_ms?: number | null;
+  tls?: unknown;
+  auth?: unknown;
+}
+
+export type LlmHostedProvider = "openai" | "anthropic";
+
+export interface LlmHostedMcpServer {
+  name: string;
+  url: string;
+  token?: string | null;
+  allowed_tools?: string[] | null;
+}
+
+export type LlmAnswer = "text" | "full";
+
+export interface LlmAgentConfig {
+  provider?: LlmProvider;
+  url?: string | null;
+  api_key?: string | null;
+  model: string;
+  system?: string | null;
+  prompt?: string;
+  messages_from_payload?: boolean;
+  tools?: LlmTool[];
+  mcp_servers?: LlmMcpServer[];
+  max_rounds?: number | null;
+  tool_concurrency?: number | null;
+  max_tokens?: number | null;
+  json?: boolean;
+  answer?: LlmAnswer;
+  options?: unknown;
+  concurrency?: number | null;
+  request_timeout_ms?: number | null;
+  tls?: unknown;
+  auth?: unknown;
+}
+
+export type LlmProvider = "openai" | "anthropic" | "openai_chat";
+
+export interface LlmTool {
+  name: string;
+  description?: string | null;
+  schema?: unknown;
+  endpoint: Endpoint;
+}
+
+export interface LlmMcpServer {
+  name: string;
+  url?: string | null;
+  token?: string | null;
+  command?: string | null;
+  args?: string[];
+  env?: Record<string, string>;
+  allowed_tools?: string[] | null;
 }
 
 export interface OpenAiEmbeddingsConfig {
