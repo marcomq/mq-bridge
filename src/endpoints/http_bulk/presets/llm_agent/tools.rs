@@ -200,6 +200,7 @@ impl McpServer {
         let client = self.client.read().await.clone();
         let params = CallToolRequestParams::new(tool.to_string()).with_arguments(arguments);
         let Ok(called) = tokio::time::timeout(CALL_TIMEOUT, client.call_tool(params)).await else {
+            self.reconnect(&client).await;
             return Err(Failure::Message(PublisherError::Retryable(anyhow!(
                 "MCP server `{}`: `{tool}` gave no result within {}s",
                 self.config.name,

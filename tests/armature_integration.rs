@@ -89,6 +89,14 @@ fn armature_messaging_test() {
 
     // Patch dependency using cargo add to point to local version
     let cargo_bin = env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    // Armature's lock pins versions below mq-bridge's floors (e.g. rdkafka-sys, uuid) and
+    // `cargo add` keeps them, so resolve afresh as a downstream `cargo update` would.
+    match fs::remove_file(test_dir.join("Cargo.lock")) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            panic!("Failed to remove armature's Cargo.lock: {error}")
+        }
+        _ => {}
+    }
     println!(
         "Patching mq-bridge dependency to local path: {:?}",
         mq_bridge_path

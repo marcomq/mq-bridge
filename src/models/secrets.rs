@@ -674,6 +674,11 @@ fn take_auth_secrets(
     prefix: &str,
     secrets: &mut HashMap<String, String>,
 ) {
+    if let Some(serde_json::Value::String(text)) = auth.as_ref() {
+        if let Ok(parsed @ serde_json::Value::Object(_)) = serde_json::from_str(text) {
+            *auth = Some(parsed);
+        }
+    }
     for (kind, field) in [
         ("oauth2", "client_secret"),
         ("login", "body"),

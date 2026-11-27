@@ -444,7 +444,7 @@ const tlsBaseRenderer = {
       return renderObject(renderContext, node, elementId, false, dataPath);
     }
 
-    const valuePath = [...dataPath, "required"];
+    const valuePath = [...toStorePath(dataPath), "required"];
     const checkboxId = `${elementId}.required`;
     const currentValue = Boolean(context.store.getPath(valuePath) ?? requiredNode.defaultValue);
 
@@ -577,7 +577,8 @@ if (!(window as any)._mqb_array_item_name_sync_installed) {
 function fixNullBooleans(node: SchemaNode, dataPath: Array<string | number>, context: RendererContext) {
   if (!node.properties) return;
   const store = context.store;
-  const data = store.getPath(dataPath);
+  const storePath = toStorePath(dataPath);
+  const data = store.getPath(storePath);
 
   if (!data || typeof data !== "object") return;
 
@@ -585,7 +586,7 @@ function fixNullBooleans(node: SchemaNode, dataPath: Array<string | number>, con
   if (!hasNullBooleans) return;
 
   window.setTimeout(() => {
-    const currentData = { ...(store.getPath(dataPath) || {}) };
+    const currentData = { ...(store.getPath(storePath) || {}) };
     let changed = false;
 
     for (const [key, prop] of Object.entries(node.properties as Record<string, SchemaNode>)) {
@@ -596,7 +597,7 @@ function fixNullBooleans(node: SchemaNode, dataPath: Array<string | number>, con
     }
 
     if (changed) {
-      store.setPath(dataPath, currentData);
+      store.setPath(storePath, currentData);
     }
   }, 0);
 }
