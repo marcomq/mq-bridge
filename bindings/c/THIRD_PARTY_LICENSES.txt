@@ -105,6 +105,10 @@ Source: https://github.com/thomcc/arcstr
 Copyright/attribution: Copyright 2016 The Miri Developers
 Copyright/attribution: Copyright (c) 2020 Thom Chiovoloni
 
+array-const-fn-init@0.1.1
+License: MIT/Apache-2.0
+Source: https://github.com/haraldh/array-const-fn-init
+
 arrayvec@0.7.8
 License: MIT OR Apache-2.0
 Source: https://github.com/bluss/arrayvec
@@ -1222,6 +1226,21 @@ itoa@1.0.18
 License: MIT OR Apache-2.0
 Source: https://github.com/dtolnay/itoa
 
+jiff-core@1.0.2
+License: Unlicense OR MIT
+Source: https://github.com/BurntSushi/jiff
+Copyright/attribution: Copyright (c) 2015 Andrew Gallant
+
+jiff-static@1.0.3
+License: Unlicense OR MIT
+Source: https://github.com/BurntSushi/jiff
+Copyright/attribution: Copyright (c) 2015 Andrew Gallant
+
+jiff@1.0.3
+License: Unlicense OR MIT
+Source: https://github.com/BurntSushi/jiff
+Copyright/attribution: Copyright (c) 2015 Andrew Gallant
+
 jni-macros@0.22.4
 License: MIT OR Apache-2.0
 Source: https://github.com/jni-rs/jni-rs
@@ -1772,6 +1791,10 @@ License: Apache-2.0 OR MIT
 Source: https://github.com/RustCrypto/universal-hashes
 Copyright/attribution: Copyright (c) 2019-2026 The RustCrypto Project Developers
 
+portable-atomic-util@0.2.8
+License: Apache-2.0 OR MIT
+Source: https://github.com/taiki-e/portable-atomic-util
+
 portable-atomic@1.15.0
 License: Apache-2.0 OR MIT
 Source: https://github.com/taiki-e/portable-atomic
@@ -1815,6 +1838,10 @@ Copyright/attribution: Copyright (c) 2016-2020 Sergio Benitez
 proc-macro2@1.0.107
 License: MIT OR Apache-2.0
 Source: https://github.com/dtolnay/proc-macro2
+
+process-wrap@10.0.2
+License: Apache-2.0 OR MIT
+Source: https://github.com/watchexec/process-wrap
 
 prost-derive@0.14.4
 License: Apache-2.0
@@ -2002,6 +2029,11 @@ Copyright/attribution: Copyright (c) 2015-2016 The resolv-conf Developers
 ring@0.17.14
 License: Apache-2.0 AND ISC
 Source: https://github.com/briansmith/ring
+
+rmcp@3.12.0
+License: Apache-2.0
+Source: https://github.com/modelcontextprotocol/rust-sdk/
+Copyright/attribution: Copyright (c) 2024-2025 Model Context Protocol a Series of LF Projects, LLC.
 
 rmp-serde@1.3.1
 License: MIT
@@ -2398,6 +2430,11 @@ sqlx@0.9.0
 License: MIT OR Apache-2.0
 Source: https://github.com/launchbadge/sqlx
 
+sse-stream@0.2.6
+License: MIT OR Apache-2.0
+Source: https://github.com/4t145/sse-stream/
+Copyright/attribution: Copyright (c) 2024 4t145
+
 stable_deref_trait@1.2.1
 License: MIT OR Apache-2.0
 Source: https://github.com/storyyeller/stable_deref_trait
@@ -2695,6 +2732,10 @@ unicode-bidi@0.3.18
 License: MIT OR Apache-2.0
 Source: https://github.com/servo/unicode-bidi
 Copyright/attribution: Copyright (c) 2015 The Rust Project Developers
+
+unicode-general-category@1.1.0
+License: Apache-2.0
+Source: https://github.com/yeslogic/unicode-general-category
 
 unicode-ident@1.0.26
 License: (MIT OR Apache-2.0) AND Unicode-3.0
@@ -3159,6 +3200,15 @@ The Apache Software Foundation (http://www.apache.org/).
 ================================================================================
 COMPONENT-SPECIFIC LICENSE AND ATTRIBUTION TEXTS
 ================================================================================
+
+----- Additional text e0e4244bc484 -----
+Applies to: rmcp@3.12.0
+
+The MCP project is undergoing a licensing transition from the MIT License to the Apache License, Version 2.0 ("Apache-2.0"). All new code and specification contributions to the project are licensed under Apache-2.0. Documentation contributions (excluding specifications) are licensed under CC-BY-4.0.
+
+Contributions for which relicensing consent has been obtained are licensed under Apache-2.0. Contributions made by authors who originally licensed their work under the MIT License and who have not yet granted explicit permission to relicense remain licensed under the MIT License.
+
+No rights beyond those granted by the applicable original license are conveyed for such contributions.
 
 ----- Additional text 08728d1c12d6 -----
 Applies to: zstd-sys@2.1.0+zstd.1.5.7

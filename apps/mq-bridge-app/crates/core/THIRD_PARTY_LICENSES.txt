@@ -135,6 +135,10 @@ Source: https://github.com/thomcc/arcstr
 Copyright/attribution: Copyright 2016 The Miri Developers
 Copyright/attribution: Copyright (c) 2020 Thom Chiovoloni
 
+array-const-fn-init@0.1.1
+License: MIT/Apache-2.0
+Source: https://github.com/haraldh/array-const-fn-init
+
 arraydeque@0.5.1
 License: MIT/Apache-2.0
 Source: https://github.com/andylokandy/arraydeque
@@ -1916,6 +1920,10 @@ Source: https://github.com/rust-lang/libz-sys
 Copyright/attribution: Copyright (c) 2014 Alex Crichton
 Copyright/attribution: Copyright (c) 2020 Josh Triplett
 
+link-section@0.19.4
+License: Apache-2.0 OR MIT
+Source: https://github.com/mmastrac/linktime
+
 linux-raw-sys@0.12.1
 License: Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
 Source: https://github.com/sunfishcode/linux-raw-sys
@@ -2707,6 +2715,10 @@ Copyright/attribution: Copyright (c) 2016-2020 Sergio Benitez
 proc-macro2@1.0.107
 License: MIT OR Apache-2.0
 Source: https://github.com/dtolnay/proc-macro2
+
+process-wrap@10.0.2
+License: Apache-2.0 OR MIT
+Source: https://github.com/watchexec/process-wrap
 
 prost-derive@0.13.5
 License: Apache-2.0
@@ -3967,6 +3979,10 @@ unicode-bidi@0.3.18
 License: MIT OR Apache-2.0
 Source: https://github.com/servo/unicode-bidi
 Copyright/attribution: Copyright (c) 2015 The Rust Project Developers
+
+unicode-general-category@1.1.0
+License: Apache-2.0
+Source: https://github.com/yeslogic/unicode-general-category
 
 unicode-ident@1.0.26
 License: (MIT OR Apache-2.0) AND Unicode-3.0
