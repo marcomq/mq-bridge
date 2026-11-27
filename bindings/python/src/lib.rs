@@ -16,7 +16,7 @@ use std::thread;
 use std::time::Duration;
 
 use ::mq_bridge as core;
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use async_trait::async_trait;
 use bytes::Bytes;
 use core::canonical_message::format_message_id;
@@ -42,7 +42,7 @@ use serde::ser::{Error as SerError, SerializeMap, SerializeSeq};
 use serde::{Serialize, Serializer};
 use serde_json::Value as JsonValue;
 use tokio::runtime::Runtime;
-use tokio::sync::{oneshot, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 use tracing::error;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -3954,9 +3954,11 @@ routes:
             .collect();
         let results = handler.handle_many(msgs).await;
         assert_eq!(results.len(), 2);
-        assert!(results
-            .iter()
-            .all(|r| matches!(r, Err(HandlerError::NonRetryable(_)))));
+        assert!(
+            results
+                .iter()
+                .all(|r| matches!(r, Err(HandlerError::NonRetryable(_))))
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -921,9 +921,10 @@ kafka_to_nats:
     #[test]
     fn test_memory_config_requires_topic_or_url() {
         let err = serde_yaml_ng::from_str::<MemoryConfig>("{}").unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("MemoryConfig: 'topic' (or 'url' alias) is required."));
+        assert!(
+            err.to_string()
+                .contains("MemoryConfig: 'topic' (or 'url' alias) is required.")
+        );
     }
 
     #[test]

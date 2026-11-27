@@ -5,8 +5,8 @@
 
 use super::transport::TransportChannel;
 use crate::CanonicalMessage;
-use anyhow::{anyhow, Result};
-use async_channel::{bounded, Receiver, Sender};
+use anyhow::{Result, anyhow};
+use async_channel::{Receiver, Sender, bounded};
 use async_trait::async_trait;
 
 /// In-process memory transport using async_channel

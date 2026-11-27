@@ -2,13 +2,13 @@
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
+use crate::CanonicalMessage;
 use crate::models::StaticConfig;
 use crate::support::interpolation::CompiledTemplate;
 use crate::traits::{
     BoxFuture, ConsumerError, MessageConsumer, MessageDisposition, MessagePublisher,
     PublisherError, Received, ReceivedBatch, Sent, SentBatch,
 };
-use crate::CanonicalMessage;
 use anyhow::Context;
 use async_trait::async_trait;
 use bytes::Bytes;

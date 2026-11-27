@@ -7,13 +7,13 @@
 //! becomes one Parquet body (schema inferred from that batch), and a Parquet body becomes
 //! one JSON-object message per row.
 
-use crate::models::Compression;
 use crate::CanonicalMessage;
-use anyhow::{anyhow, Context};
-use arrow_json::reader::{infer_json_schema, infer_json_schema_from_iterator, ReaderBuilder};
+use crate::models::Compression;
+use anyhow::{Context, anyhow};
+use arrow_json::reader::{ReaderBuilder, infer_json_schema, infer_json_schema_from_iterator};
 use arrow_json::writer::{LineDelimited, WriterBuilder};
-use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 use parquet::arrow::ArrowWriter;
+use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 use parquet::basic::{Compression as ParquetCompression, GzipLevel, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 use serde::de::{DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
@@ -98,13 +98,11 @@ impl RowBuffer {
         let payload = payload.trim_ascii();
         if payload.iter().any(|b| matches!(b, b'\n' | b'\r')) {
             // Valid JSON has line breaks only as whitespace, which the schema sample reads by line.
-            self.ndjson.extend(payload.iter().map(|&b| {
-                if matches!(b, b'\n' | b'\r') {
-                    b' '
-                } else {
-                    b
-                }
-            }));
+            self.ndjson.extend(
+                payload
+                    .iter()
+                    .map(|&b| if matches!(b, b'\n' | b'\r') { b' ' } else { b }),
+            );
         } else {
             self.ndjson.extend_from_slice(payload);
         }
@@ -709,15 +707,21 @@ mod tests {
     fn an_invalid_raw_value_wrapper_is_rejected_on_push() {
         let mut buffer = RowBuffer::default();
         buffer.push(br#"{"id":1}"#).unwrap();
-        assert!(buffer
-            .push(br#"{"$serde_json::private::RawValue":"{not json"}"#)
-            .is_err());
-        assert!(buffer
-            .push(br#"{"a":{"$serde_json::private::RawValue":"[1"}}"#)
-            .is_err());
-        assert!(buffer
-            .push(br#"{"$serde_json::private::RawValue":"[1]"}"#)
-            .is_err());
+        assert!(
+            buffer
+                .push(br#"{"$serde_json::private::RawValue":"{not json"}"#)
+                .is_err()
+        );
+        assert!(
+            buffer
+                .push(br#"{"a":{"$serde_json::private::RawValue":"[1"}}"#)
+                .is_err()
+        );
+        assert!(
+            buffer
+                .push(br#"{"$serde_json::private::RawValue":"[1]"}"#)
+                .is_err()
+        );
         let rows = decoded(buffer.encode(Compression::None).unwrap());
         assert_eq!(rows, vec![serde_json::json!({"id": 1})]);
     }

@@ -1855,12 +1855,14 @@ async fn a_chunk_that_never_reads_is_set_aside() {
     (first.commit)(vec![MessageDisposition::Ack]).await.unwrap();
 
     for _ in 0..MAX_CHUNK_READ_FAILURES {
-        assert!(consumer
-            .receive_batch(10)
-            .await
-            .unwrap()
-            .messages
-            .is_empty());
+        assert!(
+            consumer
+                .receive_batch(10)
+                .await
+                .unwrap()
+                .messages
+                .is_empty()
+        );
     }
     assert!(
         consumer.claimed.lock().unwrap().contains("000000000"),
@@ -1969,11 +1971,13 @@ async fn a_cancelled_commit_requeues_the_unsettled_chunks() {
     drop(commit);
 
     assert!(!consumer.claimed.lock().unwrap().contains("000000001"));
-    assert!(consumer
-        .requeued
-        .lock()
-        .unwrap()
-        .contains(&"000000001".to_string()));
+    assert!(
+        consumer
+            .requeued
+            .lock()
+            .unwrap()
+            .contains(&"000000001".to_string())
+    );
 }
 
 #[test]

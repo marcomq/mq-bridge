@@ -8,15 +8,15 @@ use std::process::Command;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use mq_bridge::CanonicalMessage;
 use mq_bridge::endpoints::memory::get_or_create_channel;
 use mq_bridge::extensions::get_endpoint_factory;
 use mq_bridge::models::{MemoryConfig, Route};
 use mq_bridge::plugin::load_endpoint_plugin;
 use mq_bridge::support::plugin_abi::{
-    MqbPluginEntry, MQB_PLUGIN_ENTRY_SYMBOL, MQB_PLUGIN_LIST_SYMBOL,
+    MQB_PLUGIN_ENTRY_SYMBOL, MQB_PLUGIN_LIST_SYMBOL, MqbPluginEntry,
 };
-use mq_bridge::CanonicalMessage;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..")

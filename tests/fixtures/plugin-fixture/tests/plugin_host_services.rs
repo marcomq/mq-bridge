@@ -7,10 +7,10 @@ use std::sync::{Arc, Mutex};
 use metrics::{
     Counter, CounterFn, Gauge, Histogram, Key, KeyName, Metadata, Recorder, SharedString, Unit,
 };
-use mq_bridge::plugin::{
-    load_endpoint_plugin, test_support::build_plugin_cdylib, PLUGIN_LOG_TARGET,
-};
 use mq_bridge::CanonicalMessage;
+use mq_bridge::plugin::{
+    PLUGIN_LOG_TARGET, load_endpoint_plugin, test_support::build_plugin_cdylib,
+};
 use serde_json::json;
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};

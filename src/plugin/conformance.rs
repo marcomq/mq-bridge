@@ -24,7 +24,7 @@
 
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use futures::future::BoxFuture;
 
 use crate::traits::{

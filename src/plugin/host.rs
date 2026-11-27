@@ -15,8 +15,8 @@ use std::borrow::Cow;
 use std::panic::AssertUnwindSafe;
 
 use crate::support::plugin_abi::{
-    MqbHostVTable, MqbKeyValue, MqbSlice, MQB_LOG_DEBUG, MQB_LOG_ERROR, MQB_LOG_INFO,
-    MQB_LOG_TRACE, MQB_LOG_WARN,
+    MQB_LOG_DEBUG, MQB_LOG_ERROR, MQB_LOG_INFO, MQB_LOG_TRACE, MQB_LOG_WARN, MqbHostVTable,
+    MqbKeyValue, MqbSlice,
 };
 
 /// The `tracing` target of every event a plugin logs.

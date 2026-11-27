@@ -35,7 +35,7 @@
 //! `ipc://`, `unix://` and `pipe://` topics are real transports and keep their address.
 //! A `custom` endpoint's config is opaque, so names inside it are not rewritten.
 
-use crate::endpoints::memory::{get_or_create_channel, transport::TransportUrl, MemoryChannel};
+use crate::endpoints::memory::{MemoryChannel, get_or_create_channel, transport::TransportUrl};
 use crate::models::{Endpoint, EndpointType, MemoryConfig, Middleware};
 use crate::route::RouteOutcome;
 use crate::traits::EndpointStatus;
@@ -651,9 +651,11 @@ mod tests {
     #[tokio::test]
     async fn registering_an_endpoint_also_passes_the_policy() {
         let bridge = bridge("register").with_policy(Arc::new(DenyTopic("blocked")));
-        assert!(bridge
-            .register_endpoint("target", Endpoint::new_memory("blocked", 10))
-            .is_err());
+        assert!(
+            bridge
+                .register_endpoint("target", Endpoint::new_memory("blocked", 10))
+                .is_err()
+        );
         assert!(bridge.get_endpoint("target").is_none());
     }
 

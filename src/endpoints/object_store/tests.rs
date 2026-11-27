@@ -1309,12 +1309,14 @@ async fn a_url_naming_one_object_reads_only_that_object() {
     assert_eq!(batch.messages.len(), 1);
     assert_eq!(batch.messages[0].payload.as_ref(), br#"{"n":1}"#);
     (batch.commit)(vec![MessageDisposition::Ack]).await.unwrap();
-    assert!(consumer
-        .receive_batch(10)
-        .await
-        .unwrap()
-        .messages
-        .is_empty());
+    assert!(
+        consumer
+            .receive_batch(10)
+            .await
+            .unwrap()
+            .messages
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -1328,12 +1330,14 @@ async fn a_url_naming_one_object_reads_it_once_it_is_written() {
     };
 
     let mut consumer = ObjectStoreConsumer::new(&config).await.unwrap();
-    assert!(consumer
-        .receive_batch(10)
-        .await
-        .unwrap()
-        .messages
-        .is_empty());
+    assert!(
+        consumer
+            .receive_batch(10)
+            .await
+            .unwrap()
+            .messages
+            .is_empty()
+    );
     std::fs::write(dir.path().join("a.jsonl"), b"{\"n\":1}\n").unwrap();
     let batch = consumer.receive_batch(10).await.unwrap();
     assert_eq!(batch.messages.len(), 1);

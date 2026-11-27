@@ -9,9 +9,9 @@
 // stripped when this file is included into the performance bench (a non-test
 // build), so allow them to appear unused there.
 #[allow(unused_imports)]
-use mq_bridge::endpoints::memory::transport::{TransportChannel, TransportUrl};
-#[allow(unused_imports)]
 use mq_bridge::CanonicalMessage;
+#[allow(unused_imports)]
+use mq_bridge::endpoints::memory::transport::{TransportChannel, TransportUrl};
 
 #[cfg(unix)]
 #[allow(unused_imports)]

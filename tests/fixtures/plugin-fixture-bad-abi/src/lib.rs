@@ -3,9 +3,9 @@
 //! than calling into a table it does not understand.
 
 use mq_bridge::plugin::sdk::{
-    build_vtable, ExportedVTable, NoMiddleware, CAPABILITIES_INPUT_AND_OUTPUT,
+    CAPABILITIES_INPUT_AND_OUTPUT, ExportedVTable, NoMiddleware, build_vtable,
 };
-use mq_bridge::support::plugin_abi::{MqbPluginVTable, MQB_PLUGIN_ABI_MAJOR};
+use mq_bridge::support::plugin_abi::{MQB_PLUGIN_ABI_MAJOR, MqbPluginVTable};
 use mq_bridge::traits::CustomEndpointFactory;
 
 #[derive(Debug, Default)]

@@ -1,6 +1,6 @@
+use crate::CanonicalMessage;
 use crate::models::TimeoutMiddleware;
 use crate::traits::{MessagePublisher, PublisherError, Sent, SentBatch};
-use crate::CanonicalMessage;
 use async_trait::async_trait;
 use std::any::Any;
 use std::future::Future;

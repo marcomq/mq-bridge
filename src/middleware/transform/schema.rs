@@ -3,7 +3,7 @@
 //  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
-use super::coerce::{coerce, parse_number, render_path, type_name, Crumb, Ty};
+use super::coerce::{Crumb, Ty, coerce, parse_number, render_path, type_name};
 use super::compiled::Opts;
 use super::error::{ErrorKind, TransformError};
 use serde_json::Value;

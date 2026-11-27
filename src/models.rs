@@ -23,16 +23,16 @@ pub use defaults::DEFAULT_KAFKA_PARTITIONS;
 #[cfg(feature = "grpc")]
 pub(crate) use secrets::decode_secret_map_key;
 pub use secrets::{
-    check_config_secret_keys, check_secret_key_names, extract_config_secrets, SecretExtractor,
+    SecretExtractor, check_config_secret_keys, check_secret_key_names, extract_config_secrets,
 };
 
 use serde::{
-    de::{MapAccess, Visitor},
     Deserialize, Deserializer, Serialize,
+    de::{MapAccess, Visitor},
 };
 use std::{
     collections::HashMap,
-    sync::{atomic::AtomicUsize, Arc},
+    sync::{Arc, atomic::AtomicUsize},
 };
 
 use crate::traits::Handler;

@@ -2,14 +2,14 @@
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
-use super::deferred_commit::{run_all, DeferredCommits};
+use super::deferred_commit::{DeferredCommits, run_all};
+use crate::CanonicalMessage;
 use crate::models::DeduplicationMiddleware;
 use crate::support::interpolation::CompiledTemplate;
 use crate::traits::{
     BoxFuture, ConsumerError, MessageConsumer, MessageDisposition, Received, ReceivedBatch,
 };
-use crate::CanonicalMessage;
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use async_trait::async_trait;
 use sled::Db;
 use std::any::Any;
@@ -170,7 +170,7 @@ pub(crate) fn parse_dedup_store(spec: &str) -> anyhow::Result<DedupBackend> {
                     _ => {
                         return Err(anyhow!(
                             "unknown parameter '{param}' in deduplication store '{spec}'"
-                        ))
+                        ));
                     }
                 }
             }
@@ -742,7 +742,7 @@ impl DeduplicationConsumer {
             (None, None) => {
                 return Err(anyhow!(
                     "deduplication requires either `store` or `sled_path`"
-                ))
+                ));
             }
         };
         let store = build_store(
@@ -779,7 +779,9 @@ impl DeduplicationConsumer {
         match serde_json::from_slice(&bytes) {
             Ok(reply) => MessageDisposition::Reply(reply),
             Err(e) => {
-                warn!("Stored deduplication reply is unreadable; acking the duplicate without it: {e}");
+                warn!(
+                    "Stored deduplication reply is unreadable; acking the duplicate without it: {e}"
+                );
                 MessageDisposition::Ack
             }
         }
@@ -1070,9 +1072,9 @@ impl MessageConsumer for DeduplicationConsumer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CanonicalMessage;
     use crate::endpoints::memory::MemoryConsumer;
     use crate::models::DeduplicationMiddleware;
-    use crate::CanonicalMessage;
     use std::time::Duration;
     use tempfile::tempdir;
 

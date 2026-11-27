@@ -11,13 +11,13 @@
 //! Metadata keys listed in `authenticate_metadata` are not encrypted but are
 //! bound into the AEAD tag, so altering one in transit fails decryption.
 
+use crate::CanonicalMessage;
 use crate::models::{EncryptionConfig, InputErrorPolicy};
 use crate::support::crypto::Crypto;
 use crate::traits::{
     BoxFuture, ConsumerError, MessageConsumer, MessageDisposition, MessagePublisher,
     PublisherError, Received, ReceivedBatch, Sent, SentBatch,
 };
-use crate::CanonicalMessage;
 use async_trait::async_trait;
 use std::any::Any;
 use std::sync::Arc;

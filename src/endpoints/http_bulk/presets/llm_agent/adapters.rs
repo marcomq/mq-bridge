@@ -9,7 +9,7 @@
 
 use crate::models::LlmProvider;
 use anyhow::bail;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::collections::HashSet;
 
 pub(super) const ANTHROPIC_URL: &str = "https://api.anthropic.com/v1";

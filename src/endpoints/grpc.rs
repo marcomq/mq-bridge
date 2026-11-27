@@ -11,18 +11,18 @@ mod publisher;
 mod server;
 
 pub use consumer::GrpcConsumer;
-pub use publisher::{create_grpc_publisher, GrpcPublisher};
+pub use publisher::{GrpcPublisher, create_grpc_publisher};
 
-use crate::models::{CaRoots, GrpcConfig};
 use crate::CanonicalMessage;
+use crate::models::{CaRoots, GrpcConfig};
 use anyhow::Result;
 use bytes::{Buf, BufMut};
 use std::collections::HashMap;
 use std::time::Duration;
+use tonic::Status;
 use tonic::metadata::MetadataMap;
 use tonic::transport::Channel;
 use tonic::transport::{Certificate, ClientTlsConfig, Identity};
-use tonic::Status;
 
 pub mod proto {
     #![allow(clippy::all)]
@@ -33,8 +33,8 @@ pub mod proto {
         tonic::include_file_descriptor_set!("mqbridge_descriptor");
 }
 
-use proto::bridge_client::BridgeClient;
 use proto::BridgeMessage;
+use proto::bridge_client::BridgeClient;
 
 /// Structured failure returned by descriptor-driven gRPC calls.
 ///

@@ -45,7 +45,7 @@ use std::any::Any;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use async_trait::async_trait;
 use mq_bridge::errors::{ConsumerError, InvalidConfig, PublisherError};
 use mq_bridge::traits::{
@@ -314,12 +314,12 @@ impl MessageConsumer for FixtureConsumer {
             ReceiveFailure::Retryable => {
                 return Err(ConsumerError::Connection(anyhow!(
                     "fixture injected a retryable receive failure"
-                )))
+                )));
             }
             ReceiveFailure::Permanent => {
                 return Err(ConsumerError::Permanent(anyhow!(
                     "fixture injected a permanent receive failure"
-                )))
+                )));
             }
             ReceiveFailure::EndOfStream => return Err(ConsumerError::EndOfStream),
         }
@@ -483,12 +483,12 @@ impl MessagePublisher for FixturePublisher {
             SendFailure::Retryable => {
                 return Err(PublisherError::Retryable(anyhow!(
                     "fixture injected a retryable send failure"
-                )))
+                )));
             }
             SendFailure::Permanent => {
                 return Err(PublisherError::NonRetryable(anyhow!(
                     "fixture injected a permanent send failure"
-                )))
+                )));
             }
         }
         let responses = self.responses(&messages);

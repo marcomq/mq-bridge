@@ -26,11 +26,12 @@
 //!   resumes without re-emitting. Objects are never deleted or rewritten — resume is
 //!   non-destructive, at-least-once at object granularity.
 
+use crate::CanonicalMessage;
 use crate::checkpoint::{self, CheckpointBackend, CheckpointStore, VersionedCheckpoint};
-use crate::codec::csv::{csv_append_record, parse_delimiter, CsvHeader};
+use crate::codec::CsvDialect;
+use crate::codec::csv::{CsvHeader, csv_append_record, parse_delimiter};
 use crate::codec::format::{decode_records, encode_record};
 use crate::codec::framing::split_records;
-use crate::codec::CsvDialect;
 use crate::models::{
     Compression, DatePartitionStyle, DecodeErrorPolicy, FileFormat, NameBy, ObjectStoreConfig,
     ObjectStoreFsync,
@@ -38,21 +39,20 @@ use crate::models::{
 #[cfg(feature = "encryption")]
 use crate::support::crypto::Crypto;
 use crate::support::source_ranges::{
-    finalized_name, parse_finalized_name, CoveredRanges, SourcePartition, SourceRun,
+    CoveredRanges, SourcePartition, SourceRun, finalized_name, parse_finalized_name,
 };
 use crate::traits::{
     BoxFuture, ConsumerError, MessageConsumer, MessageDisposition, MessagePublisher,
     PublisherError, ReceivedBatch, SentBatch,
 };
-use crate::CanonicalMessage;
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use async_trait::async_trait;
 use fast_uuid_v7::SequentialGenerator;
 use futures::{StreamExt, TryStreamExt};
 use object_store::local::LocalFileSystem;
 use object_store::{
-    path::Path as ObjPath, Error as ObjectStoreError, ObjectStore, ObjectStoreExt, PutMode,
-    PutOptions, PutPayload,
+    Error as ObjectStoreError, ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload,
+    path::Path as ObjPath,
 };
 use std::any::Any;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -65,7 +65,7 @@ use tracing::{info, trace, warn};
 /// both resolve creds identically — see [`checkpoint::object_store_backend::build_store`].
 use crate::checkpoint::object_store_backend::{build_store, build_store_with_fsync};
 use crate::support::local_staging::{
-    remove_suffixed_leftovers, LocalStaging, StagedName, STAGING_REAP_AGE,
+    LocalStaging, STAGING_REAP_AGE, StagedName, remove_suffixed_leftovers,
 };
 
 /// True if two object-store URLs share a scheme+host and one's path segments are a prefix
@@ -347,7 +347,9 @@ impl ObjectStorePublisher {
             )
         });
         if name_by == NameBy::SourcePosition && config.date_partition == Some(true) {
-            warn!("object_store 'date_partition' does not apply to 'name_by: source_position'; part names carry the source range and are written flat under the prefix");
+            warn!(
+                "object_store 'date_partition' does not apply to 'name_by: source_position'; part names carry the source range and are written flat under the prefix"
+            );
         }
         let staging = if staged {
             let extension = extension.clone();
@@ -930,9 +932,9 @@ impl ObjectStoreConsumer {
                                 // Misconfiguration: rebuilding the consumer reads the same config,
                                 // so this must stop the route rather than reconnect forever.
                                 return Err(anyhow::Error::new(ConsumerError::Permanent(anyhow!(
-                                "object_store checkpoint_store '{ck_url}' overlaps the source prefix '{}'; the cursor object would be listed and re-read as data. Point checkpoint_store at a different bucket or prefix.",
-                                config.url
-                            ))));
+                                    "object_store checkpoint_store '{ck_url}' overlaps the source prefix '{}'; the cursor object would be listed and re-read as data. Point checkpoint_store at a different bucket or prefix.",
+                                    config.url
+                                ))));
                             }
                         }
                         Some(open_checkpoint(external, config, cid).await?)

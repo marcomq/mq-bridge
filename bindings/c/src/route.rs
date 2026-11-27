@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::anyhow;
 use async_trait::async_trait;
 use mq_bridge_bindings_common as common;
-use mqb::support::plugin_abi::{MqbStatus, MQB_ERR_CONNECTION, MQB_ERR_RETRYABLE, MQB_OK};
+use mqb::support::plugin_abi::{MQB_ERR_CONNECTION, MQB_ERR_RETRYABLE, MQB_OK, MqbStatus};
 use mqb::traits::Handler;
 use mqb::type_handler::TypeHandler;
 use mqb::{CanonicalMessage, Handled, HandlerError, Route, RouteOutcome};

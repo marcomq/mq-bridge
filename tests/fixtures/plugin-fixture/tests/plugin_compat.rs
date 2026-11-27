@@ -10,10 +10,10 @@
 
 use std::time::Duration;
 
+use mq_bridge::CanonicalMessage;
 use mq_bridge::extensions::get_endpoint_factory;
 use mq_bridge::plugin::conformance::{self, ConformanceOptions};
 use mq_bridge::plugin::load_endpoint_plugin;
-use mq_bridge::CanonicalMessage;
 use serde_json::json;
 
 fn library(var: &str) -> Option<String> {

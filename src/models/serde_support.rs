@@ -314,7 +314,7 @@ pub(crate) fn deserialize_middlewares_from_value(
                         "Failed to deserialize known middleware '{}': {}",
                         name,
                         e
-                    ))
+                    ));
                 }
             }
         } else if let Ok(m) = serde_json::from_value::<Middleware>(item.clone()) {

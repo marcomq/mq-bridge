@@ -5,6 +5,7 @@
 
 //! Enriches each message with the responses of other, request-capable endpoints.
 
+use crate::CanonicalMessage;
 use crate::endpoints::create_publisher_from_route;
 use crate::errors::InvalidConfig;
 use crate::middleware::raw_json::write_at;
@@ -14,11 +15,10 @@ use crate::traits::{
     BatchCommitFunc, BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
     MessagePublisher, PublisherError, ReceivedBatch, Sent, SentBatch,
 };
-use crate::CanonicalMessage;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt;
-use serde_json::{value::RawValue, Value};
+use serde_json::{Value, value::RawValue};
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -161,7 +161,7 @@ async fn answer_all<T>(
             return found
                 .into_iter()
                 .map(|r| r.map(|o| o.map(from_value)))
-                .collect()
+                .collect();
         }
         Some(found) => return short(found.len()),
         None => {}
@@ -248,7 +248,7 @@ fn answer_payload(sent: Sent) -> Result<Option<Bytes>, PublisherError> {
         Sent::Ack => {
             return Err(PublisherError::NonRetryable(anyhow::anyhow!(
                 "lookup: the `from` endpoint returned no response; it must be request-capable"
-            )))
+            )));
         }
     };
     if let Some(status) = response
@@ -261,12 +261,12 @@ fn answer_payload(sent: Sent) -> Result<Option<Bytes>, PublisherError> {
             401 | 403 | 408 | 429 | 500..=504 => {
                 return Err(PublisherError::Retryable(anyhow::anyhow!(
                     "lookup: HTTP status {status}"
-                )))
+                )));
             }
             400.. => {
                 return Err(PublisherError::NonRetryable(anyhow::anyhow!(
                     "lookup: HTTP status {status}"
-                )))
+                )));
             }
             _ => {}
         }
@@ -316,7 +316,7 @@ impl Lookup {
                 return Err(InvalidConfig(anyhow::anyhow!(
                     "lookup: `from` and `into` must be set together"
                 ))
-                .into())
+                .into());
             }
         }
         for e in &config.entries {
@@ -1162,9 +1162,10 @@ entries:
         let out = lookup
             .enrich_batch(vec![msg(json!({"id": 1})), msg(json!({"id": 2}))])
             .await;
-        assert!(out
-            .iter()
-            .all(|r| matches!(r, Err((_, PublisherError::NonRetryable(_))))));
+        assert!(
+            out.iter()
+                .all(|r| matches!(r, Err((_, PublisherError::NonRetryable(_)))))
+        );
     }
 
     #[cfg(all(feature = "http-bulk", feature = "plugin", feature = "test-utils"))]

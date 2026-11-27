@@ -23,27 +23,26 @@
 
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::support::plugin_abi::{
-    MqbAsyncHooks, MqbBatchHandle, MqbBuffer, MqbConsumerHandle, MqbMessage, MqbPublisherHandle,
-    MqbResponsesHandle, MqbSlice, MqbStatus, MqbStatusHooks, MQB_DELIVERY_ACKNOWLEDGES,
-    MQB_DELIVERY_IDEMPOTENT_SINK, MQB_DELIVERY_REPLAYS_FROM_START,
+    MQB_DELIVERY_ACKNOWLEDGES, MQB_DELIVERY_IDEMPOTENT_SINK, MQB_DELIVERY_REPLAYS_FROM_START,
     MQB_DELIVERY_REQUIRES_FULL_REPLAY, MQB_DISCONNECT_COMPLETED, MQB_DISCONNECT_FAILED,
     MQB_DISCONNECT_STOPPED, MQB_DISPOSITION_ACK, MQB_DISPOSITION_NACK, MQB_DISPOSITION_REPLY,
     MQB_END_OF_STREAM, MQB_ERR_CONNECTION, MQB_ERR_INVALID_CONFIG, MQB_ERR_PANIC,
     MQB_ERR_PERMANENT, MQB_ERR_RETRYABLE, MQB_ERR_UNSUPPORTED, MQB_OK, MQB_OUTCOME_OK,
-    MQB_OUTCOME_PERMANENT,
+    MQB_OUTCOME_PERMANENT, MqbAsyncHooks, MqbBatchHandle, MqbBuffer, MqbConsumerHandle, MqbMessage,
+    MqbPublisherHandle, MqbResponsesHandle, MqbSlice, MqbStatus, MqbStatusHooks,
 };
 use anyhow::anyhow;
 use async_trait::async_trait;
 
-use super::{completion, LoadedPlugin};
+use super::{LoadedPlugin, completion};
 use crate::errors::{ConsumerError, PublisherError};
 use crate::traits::{
-    schema_flag, BatchCommitFunc, CustomEndpointFactory, DisconnectOutcome, EndpointStatus,
-    MessageConsumer, MessageDisposition, MessagePublisher,
+    BatchCommitFunc, CustomEndpointFactory, DisconnectOutcome, EndpointStatus, MessageConsumer,
+    MessageDisposition, MessagePublisher, schema_flag,
 };
 use crate::{CanonicalMessage, ReceivedBatch, SentBatch};
 
@@ -517,11 +516,7 @@ impl ConsumerHandle {
     /// still commits, so its batch is only released and the broker redelivers it.
     fn nackable(&self, len: usize) -> usize {
         let ordered = unsafe { (self.plugin.table().consumer_commit_requires_order)(self.handle) };
-        if ordered != 0 {
-            0
-        } else {
-            len
-        }
+        if ordered != 0 { 0 } else { len }
     }
 
     /// Calls `consumer_close` once; later calls are no-ops.
@@ -901,7 +896,7 @@ impl MessagePublisher for PluginPublisher {
                             messages.into_messages(),
                             &outcomes,
                             None,
-                        )
+                        );
                     }
                 }
             }
@@ -1363,7 +1358,7 @@ mod tests {
     mod teardown {
         use super::*;
         use crate::plugin::sdk::{
-            build_vtable, ExportedVTable, NoMiddleware, CAPABILITIES_INPUT_ONLY,
+            CAPABILITIES_INPUT_ONLY, ExportedVTable, NoMiddleware, build_vtable,
         };
         use crate::traits::{BoxFuture, CustomEndpointFactory};
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1445,7 +1440,7 @@ mod tests {
     mod abandoned_receive {
         use super::*;
         use crate::plugin::sdk::{
-            build_vtable, ExportedVTable, NoMiddleware, CAPABILITIES_INPUT_ONLY,
+            CAPABILITIES_INPUT_ONLY, ExportedVTable, NoMiddleware, build_vtable,
         };
         use std::sync::Mutex;
         use std::time::{Duration, Instant};

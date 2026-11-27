@@ -3,11 +3,11 @@
 //!
 //! Its own test binary: it sets the search path and discovery switch in the process env.
 
+use mq_bridge::Route;
 use mq_bridge::extensions::get_endpoint_factory;
 use mq_bridge::models::{Endpoint, EndpointType};
 use mq_bridge::plugin::discovery::{DISCOVERY_VAR, SEARCH_PATH_VAR};
 use mq_bridge::plugin::{library_file_name, test_support::build_plugin_cdylib};
-use mq_bridge::Route;
 use serde_json::json;
 
 fn route_naming_fixture_sink() -> Route {

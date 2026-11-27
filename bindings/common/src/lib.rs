@@ -14,8 +14,8 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::Context;
-use mq_bridge::models::{Endpoint, PublisherConfig};
 use mq_bridge::Route;
+use mq_bridge::models::{Endpoint, PublisherConfig};
 use serde::Deserialize;
 use tokio::runtime::{Builder, Runtime};
 

@@ -3,7 +3,7 @@
 //  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
-use super::coerce::{render_path, type_name, Crumb};
+use super::coerce::{Crumb, render_path, type_name};
 use super::error::{ErrorKind, TransformError};
 use serde_json::{Map, Value};
 
@@ -137,7 +137,7 @@ pub(super) fn insert_at(
                         "cannot nest under '{key}': it is already a {}",
                         type_name(other)
                     ),
-                ))
+                ));
             }
         };
         cur = obj

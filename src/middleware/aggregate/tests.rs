@@ -1,5 +1,5 @@
 use super::*;
-use serde_json::{json, Map};
+use serde_json::{Map, json};
 
 const SUM: &str = "{ sum: (state.sum ?? 0) + amount, n: (state.n ?? 0) + 1 }";
 
@@ -1524,11 +1524,13 @@ async fn read_only_reads_the_stored_states_and_changes_none() {
 
     let config = serde_yaml_ng::from_str(&format!("read_only: true\n{yaml}"));
     let unstored = Aggregate::connect(&config.unwrap(), "test").await;
-    assert!(unstored
-        .err()
-        .unwrap()
-        .to_string()
-        .contains("`read_only` needs a `store`"));
+    assert!(
+        unstored
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("`read_only` needs a `store`")
+    );
 }
 
 #[tokio::test]

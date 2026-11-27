@@ -80,8 +80,8 @@ mod tests {
     /// padding or decode-mode difference in `Simd::standard` cannot ship unnoticed.
     #[test]
     fn agrees_with_the_scalar_engine() {
-        use base64::engine::general_purpose::STANDARD;
         use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD;
 
         // Lengths 0..=3 cover every padding case; 1024 exercises the SIMD block path.
         for len in [0usize, 1, 2, 3, 1024] {

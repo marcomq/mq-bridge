@@ -22,8 +22,8 @@ pub use crate::models::{
     LlmHostedMcpServer, LlmHostedProvider, LlmMcpServer, LlmProvider, LlmTool, MeilisearchConfig,
     OpenAiChatConfig, OpenAiEmbeddingsConfig, QdrantConfig, TypesenseConfig,
 };
-pub(crate) use consumer::cursor_checkpoint;
 pub use consumer::HttpBulkConsumer;
+pub(crate) use consumer::cursor_checkpoint;
 pub(crate) use presets::builtin as builtin_preset;
 pub use presets::{
     base_url as preset_base_url, named_endpoint, preset_names, register_preset,
@@ -33,7 +33,7 @@ pub use publisher::HttpBulkPublisher;
 pub(crate) use stream_query::StreamQueryPublisher;
 
 use crate::models::HttpBulkConfig;
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use std::time::Duration;
 use tracing::warn;

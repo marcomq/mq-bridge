@@ -279,7 +279,7 @@ pub async fn test_ibm_mq_performance_direct2() {
 
 pub async fn test_ibm_mq_status() {
     use mq_bridge::traits::{MessageConsumer, MessagePublisher};
-    use tokio::time::{sleep, Duration};
+    use tokio::time::{Duration, sleep};
 
     setup_logging();
     run_test_with_docker_controller(
@@ -373,8 +373,8 @@ async fn test_ibm_mq_unsettled_messages_are_given_back() {
     if !mq_bridge::test_utils::should_run("ibm-mq") || !client_available() {
         return;
     }
-    use mq_bridge::traits::MessageDisposition;
     use mq_bridge::CanonicalMessage;
+    use mq_bridge::traits::MessageDisposition;
 
     setup_logging();
     run_test_with_docker("tests/integration/docker-compose/ibm_mq.yml", || async {

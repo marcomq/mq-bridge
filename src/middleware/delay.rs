@@ -1,9 +1,9 @@
+use crate::CanonicalMessage;
 use crate::models::DelayMiddleware;
 use crate::traits::{
     BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError, Received,
     ReceivedBatch, Sent, SentBatch,
 };
-use crate::CanonicalMessage;
 use async_trait::async_trait;
 use std::any::Any;
 use std::time::Duration;
@@ -93,8 +93,8 @@ impl MessagePublisher for DelayPublisher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::endpoints::memory::{MemoryConsumer, MemoryPublisher};
     use crate::CanonicalMessage;
+    use crate::endpoints::memory::{MemoryConsumer, MemoryPublisher};
     use std::time::Instant;
 
     #[tokio::test]

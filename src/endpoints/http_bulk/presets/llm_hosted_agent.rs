@@ -6,16 +6,16 @@
 //! `llm_hosted_agent`: one request per message to an API that runs the tool and MCP loop itself.
 
 use super::{bearer, nested, openai_url, with_tls};
+use crate::CanonicalMessage;
 use crate::endpoints::http_bulk::HttpBulkPublisher;
 use crate::errors::PublisherError;
 use crate::models::{LlmAnswer, LlmHostedAgentConfig, LlmHostedMcpServer, LlmHostedProvider};
 use crate::outcomes::{Sent, SentBatch};
 use crate::traits::MessagePublisher;
-use crate::CanonicalMessage;
 use anyhow::{anyhow, bail};
 use async_trait::async_trait;
 use futures::StreamExt;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 const ANTHROPIC_URL: &str = "https://api.anthropic.com/v1";
 const ANTHROPIC_MAX_TOKENS: u64 = 16000;

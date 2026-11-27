@@ -2,17 +2,17 @@
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
+use crate::CanonicalMessage;
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::event_store::{EventStore, EventStoreConsumer, RetentionPolicy};
 use crate::models::{Compression, FileConfig, FileConsumerMode, FileFormat, FileFsync, NameBy};
 #[cfg(feature = "encryption")]
 use crate::support::crypto::Crypto;
 use crate::support::local_staging::{LocalStaging, StagedName};
-use crate::support::source_ranges::{finalized_name, CoveredRanges};
+use crate::support::source_ranges::{CoveredRanges, finalized_name};
 use crate::traits::{
     ConsumerError, MessageConsumer, MessagePublisher, PublisherError, ReceivedBatch, SentBatch,
 };
-use crate::CanonicalMessage;
 use anyhow::Context;
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
@@ -29,12 +29,12 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::Mutex;
 use tracing::{info, instrument, trace, warn};
 
-use crate::codec::csv::{csv_append_record, parse_delimiter, CsvHeader};
+pub(crate) use crate::codec::CsvDialect;
+use crate::codec::csv::{CsvHeader, csv_append_record, parse_delimiter};
 use crate::codec::format::{
-    decode_records, encode_record, parse_message, strip_leading_bom, RecordSpan,
+    RecordSpan, decode_records, encode_record, parse_message, strip_leading_bom,
 };
 use crate::codec::framing::record_quotes;
-pub(crate) use crate::codec::CsvDialect;
 
 /// A sink that writes messages to a file, one per line.
 static FILE_LOCKS: Lazy<StdMutex<HashMap<String, Arc<Mutex<()>>>>> =
@@ -2167,7 +2167,9 @@ impl<R: std::io::Read> EncryptedFramesReader<R> {
         if len > MAX_ENCRYPTED_FRAME_BYTES {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("encrypted frame length {len} exceeds the {MAX_ENCRYPTED_FRAME_BYTES} byte cap (corrupt file?)"),
+                format!(
+                    "encrypted frame length {len} exceeds the {MAX_ENCRYPTED_FRAME_BYTES} byte cap (corrupt file?)"
+                ),
             ));
         }
         let mut sealed = vec![0u8; len as usize];

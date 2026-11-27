@@ -7,15 +7,15 @@
 //! of the body, and the answers are matched to the messages by position. With
 //! `per_message` each message is a request of its own.
 
-use super::publisher::{around, scalar_text, Failure};
-use super::{quoted, Connection, JSON};
+use super::publisher::{Failure, around, scalar_text};
+use super::{Connection, JSON, quoted};
+use crate::CanonicalMessage;
 use crate::models::{HttpBulkFormat, HttpBulkQuery};
 use crate::support::http_status;
 use crate::support::interpolation::CompiledTemplate;
-use crate::CanonicalMessage;
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use futures::StreamExt;
-use reqwest::header::{HeaderValue, CONTENT_TYPE};
+use reqwest::header::{CONTENT_TYPE, HeaderValue};
 use serde_json::Value;
 
 const REQUESTS: &str = "{requests}";
@@ -605,12 +605,12 @@ fn log_usage(response: &Value) {
 
 #[cfg(all(test, feature = "plugin", feature = "test-utils"))]
 mod tests {
+    use crate::CanonicalMessage;
     use crate::endpoints::http_bulk::HttpBulkPublisher;
     use crate::models::HttpBulkConfig;
     use crate::plugin::test_support::{StubHttpServer, StubRequest};
     use crate::traits::MessagePublisher;
-    use crate::CanonicalMessage;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     async fn server(
         respond: impl Fn(&StubRequest) -> (u16, String) + Send + Sync + 'static,
@@ -626,7 +626,7 @@ mod tests {
 
     #[test]
     fn usage_tells_cached_tokens_from_a_server_that_reports_none() {
-        use super::{usage, TokenUsage};
+        use super::{TokenUsage, usage};
         let full = json!({"usage": {
             "prompt_tokens": 90,
             "completion_tokens": 7,

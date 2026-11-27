@@ -75,6 +75,7 @@
 //!
 //! ```
 
+use crate::CanonicalMessage;
 /// The publisher side writes messages to a shared `topic`. Each message must
 /// include `metadata["correlation_id"]`; HTTP response streaming adds this
 /// automatically from the request `correlation_id`, or falls back to the
@@ -120,9 +121,8 @@ use crate::traits::{
     BatchCommitFunc, BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
     MessagePublisher, PublisherError, ReceivedBatch, Sent, SentBatch,
 };
-use crate::CanonicalMessage;
 use anyhow::anyhow;
-use async_channel::{bounded, Receiver, Sender};
+use async_channel::{Receiver, Sender, bounded};
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use std::any::Any;

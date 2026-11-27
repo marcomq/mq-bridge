@@ -227,7 +227,7 @@ mod tests {
     use super::*;
     use crate::blocking_handler::{HandlerContext, ThreadedHandler};
     use crate::models::MemoryConfig;
-    use crate::{get_or_create_channel, CanonicalMessage, Handled, Publisher};
+    use crate::{CanonicalMessage, Handled, Publisher, get_or_create_channel};
     use std::time::Duration;
 
     fn memory_route(topic: &str) -> Route {

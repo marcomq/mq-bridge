@@ -46,10 +46,10 @@ use crate::endpoints::memory::MemoryPublisher;
 use crate::models::{Endpoint, EndpointType, MemoryConfig, Route};
 use crate::traits::{MessagePublisher, PublisherError};
 use crate::{CanonicalMessage, Sent};
-use anyhow::{anyhow, bail, Context};
+use anyhow::{Context, anyhow, bail};
+use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde::ser::{SerializeMap, Serializer};
-use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 use std::hash::BuildHasher;
 use std::path::Path;
@@ -450,8 +450,8 @@ impl CallerBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::errors::HandlerError;
     use crate::Handled;
+    use crate::errors::HandlerError;
 
     fn unique(prefix: &str) -> String {
         format!("{prefix}_{}", fast_uuid_v7::gen_id_str())
@@ -493,11 +493,13 @@ mod tests {
             .call_many_messages(vec!["c".into(), "bad".into(), "d".into()])
             .await;
         assert_eq!(many[0].as_ref().unwrap().get_payload_str(), "enriched c");
-        assert!(many[1]
-            .as_ref()
-            .unwrap_err()
-            .to_string()
-            .contains("cannot enrich"));
+        assert!(
+            many[1]
+                .as_ref()
+                .unwrap_err()
+                .to_string()
+                .contains("cannot enrich")
+        );
         assert_eq!(many[2].as_ref().unwrap().get_payload_str(), "enriched d");
 
         assert!(caller.stop().await);

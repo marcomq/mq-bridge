@@ -4,7 +4,7 @@ pub mod contract;
 use crate::traits::{BoxFuture, MessageDisposition, MessagePublisher, Received};
 use crate::traits::{ConsumerError, MessageConsumer, PublisherError, ReceivedBatch, SentBatch};
 use crate::{CanonicalMessage, Route};
-use async_channel::{bounded, Receiver, Sender};
+use async_channel::{Receiver, Sender, bounded};
 use once_cell::sync::Lazy;
 use serde_json::json;
 use std::any::Any;
@@ -1015,7 +1015,9 @@ impl Drop for PerformanceSummaryPrinter {
                 format_pretty(result.single_read_performance)
             );
         }
-        println!("-------------------------------------------------------------------------------------------------\n");
+        println!(
+            "-------------------------------------------------------------------------------------------------\n"
+        );
     }
 }
 /// A test harness that manages the lifecycle of Docker containers for a single test.
@@ -1670,7 +1672,9 @@ pub fn print_benchmark_results(
                 format_pretty(stats.single_read_performance)
             );
         }
-        println!("---------------------------------------------------------------------------------------\n");
+        println!(
+            "---------------------------------------------------------------------------------------\n"
+        );
     }
     print_incomplete_benchmarks();
 }
@@ -2007,8 +2011,8 @@ pub async fn run_concurrency_test(
     sender: crate::models::Endpoint,
 ) {
     use crate::traits::Handled;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     let work_duration = Duration::from_millis(500);
@@ -2075,9 +2079,9 @@ pub async fn run_concurrency_test(
 /// out-of-crate dev harness, and can be split back out if it grows.
 #[doc(hidden)]
 pub mod bench {
+    use crate::CanonicalMessage;
     #[cfg(feature = "file")]
     use crate::models::FileFormat;
-    use crate::CanonicalMessage;
 
     /// Decodes a CSV corpus the way the file source does: the first record establishes the
     /// column header, every later record becomes one message.

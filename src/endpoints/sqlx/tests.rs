@@ -1,4 +1,4 @@
-use super::cursor::{pg_rfc3339, SqlCursor};
+use super::cursor::{SqlCursor, pg_rfc3339};
 use super::*;
 use crate::traits::{MessageConsumer, MessagePublisher};
 use tempfile::tempdir;
@@ -64,11 +64,13 @@ fn extract_copy_columns_accepts_token_only_tuple() {
 #[test]
 fn extract_copy_columns_rejects_on_conflict_and_literals() {
     // ON CONFLICT is not expressible via COPY.
-    assert!(extract_copy_columns(
-        "INSERT INTO t (a) VALUES (${payload:a}) ON CONFLICT DO NOTHING",
-        1,
-    )
-    .is_err());
+    assert!(
+        extract_copy_columns(
+            "INSERT INTO t (a) VALUES (${payload:a}) ON CONFLICT DO NOTHING",
+            1,
+        )
+        .is_err()
+    );
     // A non-token literal in the VALUES tuple breaks positional mapping. token_count matches the
     // two columns so the count check passes and the literal-residue check is what rejects it.
     assert!(extract_copy_columns("INSERT INTO t (a, b) VALUES (${payload:a}, now())", 2,).is_err());
@@ -2049,10 +2051,12 @@ async fn writing_lookup_postgres_runs_a_batch_as_one_function_call() {
          ON CONFLICT (k) DO UPDATE SET c = counters_pg.c + ${payload:n} RETURNING k, c) \
          SELECT k, c FROM ins";
     let fallback = SqlxPublisher::new(&config(nested)).await.unwrap();
-    assert!(fallback
-        .lookup_batch(&[counter_msg("a", 1), counter_msg("a", 1)])
-        .await
-        .is_none());
+    assert!(
+        fallback
+            .lookup_batch(&[counter_msg("a", 1), counter_msg("a", 1)])
+            .await
+            .is_none()
+    );
     assert!(fallback.pg_batch_active().is_none());
     let Sent::Response(one) = fallback.send(counter_msg("a", 1)).await.unwrap() else {
         panic!("a lookup answers");
@@ -2336,13 +2340,17 @@ async fn auto_columns_fails_only_the_record_it_cannot_map() {
         panic!("expected two failed records");
     };
     assert_eq!(failed.len(), 2);
-    assert!(failed
-        .iter()
-        .all(|(_, e)| matches!(e, PublisherError::NonRetryable(_))));
-    assert!(failed[1]
-        .1
-        .to_string()
-        .contains("columns: id, name, qty, extra"));
+    assert!(
+        failed
+            .iter()
+            .all(|(_, e)| matches!(e, PublisherError::NonRetryable(_)))
+    );
+    assert!(
+        failed[1]
+            .1
+            .to_string()
+            .contains("columns: id, name, qty, extra")
+    );
     assert_eq!(auto_rows(&pool).await.len(), 1);
 }
 
@@ -2385,9 +2393,11 @@ async fn auto_columns_rejects_a_config_it_cannot_serve() {
         key: Some("sku".to_string()),
         ..base.clone()
     };
-    assert!(error(bad_key)
-        .await
-        .contains("`key` column 'sku' is not a column"));
+    assert!(
+        error(bad_key)
+            .await
+            .contains("`key` column 'sku' is not a column")
+    );
     let both = SqlxConfig {
         insert_query: Some("INSERT INTO t (id) VALUES (?)".to_string()),
         ..base.clone()
@@ -2398,9 +2408,11 @@ async fn auto_columns_rejects_a_config_it_cannot_serve() {
         key: Some("id".to_string()),
         ..base
     };
-    assert!(error(key_only)
-        .await
-        .contains("`key` needs `columns: auto`"));
+    assert!(
+        error(key_only)
+            .await
+            .contains("`key` needs `columns: auto`")
+    );
 }
 
 #[tokio::test]

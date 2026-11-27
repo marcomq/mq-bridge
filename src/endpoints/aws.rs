@@ -1,17 +1,17 @@
+use crate::CanonicalMessage;
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::AwsConfig;
 use crate::traits::{
     BatchCommitFunc, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
     MessagePublisher, PublisherError, ReceivedBatch, Sent, SentBatch,
 };
-use crate::CanonicalMessage;
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
-use aws_sdk_sns::config::Credentials;
 use aws_sdk_sns::Client as SnsClient;
+use aws_sdk_sns::config::Credentials;
 use aws_sdk_sqs::Client as SqsClient;
-use base64::{engine::general_purpose, Engine as _};
+use base64::{Engine as _, engine::general_purpose};
 use std::any::Any;
 use std::collections::HashMap;
 use tracing::{error, trace};

@@ -4,15 +4,15 @@
 #![allow(clippy::exit)]
 
 #[cfg(feature = "http")]
+use mq_bridge::CanonicalMessage;
+#[cfg(feature = "http")]
+use mq_bridge::Route;
+#[cfg(feature = "http")]
 use mq_bridge::endpoints::create_publisher_from_route;
 #[cfg(feature = "http")]
 use mq_bridge::models::{Endpoint, EndpointType, HttpConfig};
 #[cfg(feature = "http")]
 use mq_bridge::traits::{MessageConsumer, MessageDisposition, MessagePublisher, Sent};
-#[cfg(feature = "http")]
-use mq_bridge::CanonicalMessage;
-#[cfg(feature = "http")]
-use mq_bridge::Route;
 #[cfg(feature = "http")]
 use std::collections::HashMap;
 #[cfg(feature = "http")]
@@ -692,7 +692,13 @@ async fn run_publisher_load(args: ProfileArgs) -> anyhow::Result<()> {
 
     println!(
         "READY sink=http://{}{} mode={:?} duration_s={} clients={} route_concurrency={} batch_size={}",
-        addr, args.path, args.mode, args.duration_s, args.clients, args.route_concurrency, args.batch_size
+        addr,
+        args.path,
+        args.mode,
+        args.duration_s,
+        args.clients,
+        args.route_concurrency,
+        args.batch_size
     );
 
     let stop = Arc::new(AtomicBool::new(false));

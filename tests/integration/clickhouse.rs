@@ -1,13 +1,13 @@
 #![allow(dead_code)]
 #![cfg(feature = "clickhouse")]
 
+use mq_bridge::CanonicalMessage;
 use mq_bridge::endpoints::clickhouse::{ClickHouseCursorReader, ClickHousePublisher};
 use mq_bridge::models::ClickHouseConfig;
 use mq_bridge::test_utils::{run_test_with_docker, setup_logging};
 use mq_bridge::traits::{
     MessageConsumer, MessageDisposition, MessagePublisher, PublisherError, Sent,
 };
-use mq_bridge::CanonicalMessage;
 
 const DOCKER_COMPOSE_FILE: &str = "tests/integration/docker-compose/clickhouse.yml";
 const CH_URL: &str = "http://localhost:8123";
@@ -203,7 +203,7 @@ pub async fn test_clickhouse_roundtrip() {
 /// Publisher and cursor-reader report health, then unhealthy when the server stops.
 pub async fn test_clickhouse_status() {
     use mq_bridge::test_utils::run_test_with_docker_controller;
-    use tokio::time::{sleep, Duration};
+    use tokio::time::{Duration, sleep};
 
     setup_logging();
     run_test_with_docker_controller(DOCKER_COMPOSE_FILE, |controller| async move {

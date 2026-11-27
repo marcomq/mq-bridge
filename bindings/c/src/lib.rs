@@ -18,16 +18,16 @@ mod publisher;
 mod route;
 
 use std::cell::RefCell;
-use std::ffi::{c_char, c_void, CStr, CString};
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::ffi::{CStr, CString, c_char, c_void};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use mq_bridge_bindings_common as common;
 use mqb::errors::{ConsumerError, ProcessingError};
 use mqb::support::plugin_abi::{
-    MqbPluginVTable, MqbStatus, MQB_ERR_CONNECTION, MQB_ERR_PANIC, MQB_ERR_PERMANENT,
-    MQB_ERR_RETRYABLE, MQB_OK,
+    MQB_ERR_CONNECTION, MQB_ERR_PANIC, MQB_ERR_PERMANENT, MQB_ERR_RETRYABLE, MQB_OK,
+    MqbPluginVTable, MqbStatus,
 };
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;

@@ -17,7 +17,7 @@
 //! was reachable.
 
 use crate::CanonicalMessage;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use bytes::{Bytes, BytesMut};
 use futures::{FutureExt, SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncWrite};

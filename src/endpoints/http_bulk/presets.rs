@@ -19,10 +19,10 @@ use crate::models::{
     OpenAiChatConfig, OpenAiEmbeddingsConfig, QdrantConfig, TypesenseConfig,
 };
 use crate::traits::{CustomEndpointFactory, MessageConsumer, MessagePublisher};
-use anyhow::{anyhow, bail, Context};
+use anyhow::{Context, anyhow, bail};
 use async_trait::async_trait;
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 /// One named endpoint: the schema it shows and how its config becomes `http_bulk`.
@@ -226,7 +226,9 @@ pub fn base_url(name: &str, url: &str) -> anyhow::Result<String> {
 pub fn segment<'a>(field: &str, name: &'a str) -> anyhow::Result<&'a str> {
     let reserved = ['/', '?', '#', '&', '%', '{', '}', ' '];
     if name.is_empty() || name == "." || name == ".." || name.contains(reserved) {
-        bail!("'{field}' must be one name without '/', '?', '#', '&', '%', braces or spaces, got '{name}'");
+        bail!(
+            "'{field}' must be one name without '/', '?', '#', '&', '%', braces or spaces, got '{name}'"
+        );
     }
     Ok(name)
 }
@@ -798,8 +800,8 @@ mod tests {
         };
         assert_eq!((name.as_str(), config), ("acme", json!({"a": 1})));
     }
-    use crate::plugin::test_support::StubHttpServer;
     use crate::CanonicalMessage;
+    use crate::plugin::test_support::StubHttpServer;
 
     #[test]
     fn the_answer_field_is_found_through_a_schema_ref() {

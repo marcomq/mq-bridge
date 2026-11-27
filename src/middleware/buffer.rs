@@ -1,9 +1,9 @@
+use crate::CanonicalMessage;
 use crate::models::BufferMiddleware;
 use crate::traits::{
     BatchCommitFunc, BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
     MessagePublisher, PublisherError, Received, ReceivedBatch, Sent, SentBatch,
 };
-use crate::CanonicalMessage;
 use anyhow::anyhow;
 use async_trait::async_trait;
 use futures::FutureExt;
@@ -11,8 +11,8 @@ use std::any::Any;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
-use tokio::sync::{oneshot, Mutex};
-use tokio::time::{timeout_at, Duration, Instant};
+use tokio::sync::{Mutex, oneshot};
+use tokio::time::{Duration, Instant, timeout_at};
 
 struct PendingEntry {
     message: CanonicalMessage,
@@ -569,7 +569,7 @@ mod tests {
     use async_trait::async_trait;
     use std::sync::{Arc, Mutex as StdMutex};
     use tokio::sync::Notify;
-    use tokio::time::{timeout, Instant};
+    use tokio::time::{Instant, timeout};
 
     #[derive(Clone)]
     struct BlockingPublisher {

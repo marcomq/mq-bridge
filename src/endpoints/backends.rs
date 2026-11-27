@@ -17,7 +17,7 @@ fn not_built(what: &str, backend: &CheckpointBackend) -> anyhow::Error {
         CheckpointBackend::Mongo { url, .. } => (url, "'mongodb' feature"),
         CheckpointBackend::ObjectStore { url } => (url, "'object-store' feature"),
         other => {
-            return anyhow!("{what} needs a postgres, mysql, sqlite or mongodb URL; got {other:?}")
+            return anyhow!("{what} needs a postgres, mysql, sqlite or mongodb URL; got {other:?}");
         }
     };
     anyhow!(

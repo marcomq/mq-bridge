@@ -79,7 +79,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use anyhow::{anyhow, bail, Context};
+use anyhow::{Context, anyhow, bail};
 use serde_json::{Map, Value};
 
 /// The per-property annotation naming a field's place in a URI.
@@ -731,7 +731,7 @@ fn flatten_node<'a>(
                     .iter()
                     .map(|i| flatten_node(i, root, path, cyclic))
                     .collect(),
-            )
+            );
         }
         other => return other.clone(),
     };

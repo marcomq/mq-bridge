@@ -56,7 +56,9 @@ impl MongoDbConsumer {
             }
             Err(e) if matches!(*e.kind, ErrorKind::Command(ref cmd_err) if cmd_err.code == 40573) =>
             {
-                info!("MongoDB is a single instance (ChangeStream support check failed). Falling back to polling for consumer.");
+                info!(
+                    "MongoDB is a single instance (ChangeStream support check failed). Falling back to polling for consumer."
+                );
                 (None, "polling")
             }
             Err(e) => return Err(e.into()), // For any other error, we propagate it.
@@ -110,7 +112,7 @@ impl MessageConsumer for MongoDbConsumer {
                     Ok(Some(Ok(_))) => continue, // Event received, loop back to try claiming documents.
                     Ok(Some(Err(e))) => return Err(ConsumerError::Connection(e.into())),
                     Ok(None) => {
-                        return Err(anyhow!("MongoDB change stream ended unexpectedly").into())
+                        return Err(anyhow!("MongoDB change stream ended unexpectedly").into());
                     }
                     Err(_) => continue, // Timeout, loop back to check for documents.
                 }
@@ -164,7 +166,7 @@ impl MessageConsumer for MongoDbConsumer {
                     Ok(Some(Ok(_))) => continue, // Event received, loop back to claim.
                     Ok(Some(Err(e))) => return Err(ConsumerError::Connection(e.into())),
                     Ok(None) => {
-                        return Err(anyhow!("MongoDB change stream ended unexpectedly").into())
+                        return Err(anyhow!("MongoDB change stream ended unexpectedly").into());
                     }
                     Err(_) => {} // Timeout: fall through to return the empty batch.
                 }

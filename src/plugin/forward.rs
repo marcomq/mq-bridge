@@ -16,8 +16,8 @@ use tracing::field::{Field, Visit};
 use tracing::span;
 
 use crate::support::plugin_abi::{
-    MqbHostVTable, MqbSlice, MQB_HOST_VTABLE_SIZE_V1_2, MQB_LOG_DEBUG, MQB_LOG_ERROR, MQB_LOG_INFO,
-    MQB_LOG_TRACE, MQB_LOG_WARN,
+    MQB_HOST_VTABLE_SIZE_V1_2, MQB_LOG_DEBUG, MQB_LOG_ERROR, MQB_LOG_INFO, MQB_LOG_TRACE,
+    MQB_LOG_WARN, MqbHostVTable, MqbSlice,
 };
 
 #[derive(Clone, Copy)]
@@ -69,8 +69,7 @@ impl tracing::Subscriber for Forwarder {
     }
 
     fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
-        metadata.is_event()
-            && unsafe { (self.0 .0.log_enabled)(level_code(*metadata.level())) } != 0
+        metadata.is_event() && unsafe { (self.0.0.log_enabled)(level_code(*metadata.level())) } != 0
     }
 
     fn new_span(&self, _: &span::Attributes<'_>) -> span::Id {
@@ -89,7 +88,7 @@ impl tracing::Subscriber for Forwarder {
         }
         let metadata = event.metadata();
         unsafe {
-            (self.0 .0.log)(
+            (self.0.0.log)(
                 level_code(*metadata.level()),
                 MqbSlice::from_str(metadata.target()),
                 MqbSlice::from_str(&text.message),
@@ -138,8 +137,8 @@ mod metrics_forwarding {
 
     use super::Host;
     use crate::support::plugin_abi::{
-        MqbKeyValue, MqbSlice, MQB_METRIC_COUNTER, MQB_METRIC_COUNTER_ABSOLUTE,
-        MQB_METRIC_GAUGE_ADD, MQB_METRIC_GAUGE_SET, MQB_METRIC_HISTOGRAM,
+        MQB_METRIC_COUNTER, MQB_METRIC_COUNTER_ABSOLUTE, MQB_METRIC_GAUGE_ADD,
+        MQB_METRIC_GAUGE_SET, MQB_METRIC_HISTOGRAM, MqbKeyValue, MqbSlice,
     };
 
     pub(super) struct MetricsForwarder(pub(super) Host);

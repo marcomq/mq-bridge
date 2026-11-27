@@ -11,12 +11,12 @@
 
 use std::time::Instant;
 
+use mq_bridge::CanonicalMessage;
 use mq_bridge::endpoints::zeromq::{
     ZeroMqConsumer, ZeroMqOmqConsumer, ZeroMqOmqPublisher, ZeroMqPublisher,
 };
 use mq_bridge::models::{ZeroMqConfig, ZeroMqFormat, ZeroMqSocketType};
 use mq_bridge::traits::{MessageConsumer, MessagePublisher};
-use mq_bridge::CanonicalMessage;
 
 const N: usize = 200_000;
 const PAYLOAD_BYTES: usize = 64;

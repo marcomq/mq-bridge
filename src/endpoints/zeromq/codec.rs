@@ -4,9 +4,9 @@
 //! wire message type; the framing/format rules live here and are exercised by
 //! the unit tests in `zeromq.rs`.
 
+use crate::CanonicalMessage;
 use crate::models::{ZeroMqConfig, ZeroMqFormat, ZeroMqSocketType};
 use crate::traits::PublisherError;
-use crate::CanonicalMessage;
 use anyhow::anyhow;
 use bytes::Bytes;
 use tracing::{debug, warn};

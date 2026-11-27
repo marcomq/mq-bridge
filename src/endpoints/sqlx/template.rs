@@ -267,7 +267,7 @@ pub(super) fn parse_template_with(
                         "Malformed token in insert_query: unknown prefix '{}' in '${{{}}}' (expected 'metadata' or 'payload')",
                         other,
                         inner
-                    ))
+                    ));
                 }
             };
             sources.push(source);

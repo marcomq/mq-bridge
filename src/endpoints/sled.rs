@@ -3,14 +3,14 @@
 //  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
+use crate::CanonicalMessage;
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::SledConfig;
 use crate::traits::{
     ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition, MessagePublisher,
     PublisherError, Received, ReceivedBatch, Sent, SentBatch,
 };
-use crate::CanonicalMessage;
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use sled::Transactional;
@@ -440,7 +440,7 @@ mod tests {
     use super::*;
     use crate::CanonicalMessage;
     use tempfile::tempdir;
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{Duration, timeout};
 
     #[tokio::test]
     async fn test_sled_queue_mode() {

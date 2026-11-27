@@ -271,7 +271,7 @@ impl SqlDedupStore {
         now: u64,
     ) -> Result<Vec<crate::middleware::deduplication::Reservation>, ConsumerError> {
         use crate::middleware::deduplication::{
-            hex_key, DedupStore, Reservation, PENDING_TTL_SECS,
+            DedupStore, PENDING_TTL_SECS, Reservation, hex_key,
         };
         let ids: Vec<String> = keys.iter().map(|k| hex_key(k)).collect();
         let stored = self.stored_expiries(&ids).await?;
@@ -320,7 +320,7 @@ impl crate::middleware::deduplication::DedupStore for SqlDedupStore {
         key: &[u8],
         now: u64,
     ) -> Result<crate::middleware::deduplication::Reservation, ConsumerError> {
-        use crate::middleware::deduplication::{hex_key, Reservation, PENDING_TTL_SECS};
+        use crate::middleware::deduplication::{PENDING_TTL_SECS, Reservation, hex_key};
         let id = hex_key(key);
         let claim = -((now + PENDING_TTL_SECS) as i64);
         let now = now as i64;

@@ -2,9 +2,9 @@ use std::ffi::c_char;
 use std::sync::OnceLock;
 
 use anyhow::anyhow;
+use mqb::CanonicalMessage;
 use mqb::canonical_message::{format_message_id, message_id_from_str};
 use mqb::support::plugin_abi::{MqbSlice, MqbStatus};
-use mqb::CanonicalMessage;
 
 use crate::{guard, guard_new, handle, text};
 

@@ -3,8 +3,9 @@
 
 use mq_bridge::endpoints::sqlx::{SqlxConsumer, SqlxPublisher};
 use mq_bridge::test_utils::{
-    add_performance_result, run_direct_perf_test, run_performance_pipeline_test_named,
-    run_test_with_docker, run_test_with_docker_controller, setup_logging, PERF_TEST_MESSAGE_COUNT,
+    PERF_TEST_MESSAGE_COUNT, add_performance_result, run_direct_perf_test,
+    run_performance_pipeline_test_named, run_test_with_docker, run_test_with_docker_controller,
+    setup_logging,
 };
 use std::future::Future;
 use std::sync::Arc;
@@ -250,7 +251,7 @@ pub async fn test_mysql_performance_direct() {
 
 pub async fn test_mysql_status() {
     use mq_bridge::traits::{MessageConsumer, MessagePublisher};
-    use tokio::time::{sleep, Duration};
+    use tokio::time::{Duration, sleep};
 
     setup_logging();
     run_test_with_docker_controller(DOCKER_COMPOSE_FILE, |controller| async move {

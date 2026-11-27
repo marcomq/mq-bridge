@@ -8,7 +8,7 @@ use crate::CanonicalMessage;
 
 #[test]
 fn change_event_source_metadata_is_opt_in_and_orders_by_cluster_time() {
-    use mongodb::bson::{doc, Timestamp};
+    use mongodb::bson::{Timestamp, doc};
     use mongodb::change_stream::event::ChangeStreamEvent;
 
     let event: ChangeStreamEvent<mongodb::bson::Document> = mongodb::bson::from_document(doc! {
@@ -29,9 +29,10 @@ fn change_event_source_metadata_is_opt_in_and_orders_by_cluster_time() {
         &ordinals,
     )
     .expect("event carries a payload");
-    assert!(!off
-        .metadata_iter()
-        .any(|(key, _)| crate::canonical_message::is_source_metadata_key(key)));
+    assert!(
+        !off.metadata_iter()
+            .any(|(key, _)| crate::canonical_message::is_source_metadata_key(key))
+    );
 
     let on = super::readers::MongoDbChangeStreamReader::event_to_message(
         &event,
@@ -67,7 +68,7 @@ fn change_event_source_metadata_is_opt_in_and_orders_by_cluster_time() {
 
 #[test]
 fn only_a_duplicate_id_counts_as_already_stored() {
-    use super::publisher::{classify_insert_error, InsertRejection};
+    use super::publisher::{InsertRejection, classify_insert_error};
     let dup = |index: &str| {
         format!("E11000 duplicate key error collection: db.c index: {index} dup key: {{ a: 1 }}")
     };
@@ -393,7 +394,7 @@ fn tag_outcome_on_returns_tagged_response() {
 #[tokio::test]
 #[ignore = "requires a MongoDB on localhost:27017"]
 async fn mongo_dedup_store_states_release_and_replies() {
-    use crate::middleware::deduplication::{Reservation, PENDING_TTL_SECS};
+    use crate::middleware::deduplication::{PENDING_TTL_SECS, Reservation};
     let collection = format!("dedup_states_{}", fast_uuid_v7::gen_id());
     let store = build_mongo_dedup_store(
         "mongodb://localhost:27017",
@@ -926,11 +927,13 @@ fn chainable_steps_rewrite_operators_and_refuse_what_cannot_chain() {
     assert_eq!(touched, ["c", "old"]);
     let (_, touched) = chain(Steps(vec![doc! { "$set": { "s.sum": 1, "t": 2 } }])).unwrap();
     assert_eq!(touched, ["s", "t"]);
-    assert!(chain(Steps(vec![
-        doc! { "$set": { "a": 1 } },
-        doc! { "$unset": ["b"] }
-    ]))
-    .is_some());
+    assert!(
+        chain(Steps(vec![
+            doc! { "$set": { "a": 1 } },
+            doc! { "$unset": ["b"] }
+        ]))
+        .is_some()
+    );
 
     for refused in [
         Ops(doc! { "$setOnInsert": { "a": 1 } }),
@@ -1072,9 +1075,11 @@ async fn mongo_update_batch_field_answers_like_one_call_per_message() {
             let expected = plain.lookup_batch(batch).await.unwrap().unwrap();
             let answers = folded.lookup_batch(batch).await.unwrap().unwrap();
             assert_eq!(answers, expected, "update: {update}");
-            assert!(answers
-                .iter()
-                .all(|a| a.as_ref().unwrap().get("_mqb").is_none()));
+            assert!(
+                answers
+                    .iter()
+                    .all(|a| a.as_ref().unwrap().get("_mqb").is_none())
+            );
             let leftover = stored
                 .count_documents(doc! { "_mqb": { "$exists": true } })
                 .await
@@ -1199,7 +1204,7 @@ async fn mongo_load_mode_takes_replace_only_and_no_lookups() {
 #[ignore = "requires a MongoDB on localhost:27017"]
 async fn mongo_load_mode_replace_swaps_only_a_completed_load() {
     use crate::traits::DisconnectOutcome::{Completed, Stopped};
-    use mongodb::bson::{doc, Document};
+    use mongodb::bson::{Document, doc};
     let name = format!("load_{}", fast_uuid_v7::gen_id());
     let db = mongodb::Client::with_uri_str("mongodb://localhost:27017")
         .await

@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, bail, Context};
+use anyhow::{Context, anyhow, bail};
 
 use crate::traits::MessageConsumer;
 use crate::{CanonicalMessage, ReceivedBatch};

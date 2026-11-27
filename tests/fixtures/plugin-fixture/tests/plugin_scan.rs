@@ -21,9 +21,11 @@ fn only_an_explicit_scan_loads_a_library_no_route_named() {
     std::fs::write(dir.join("README.txt"), b"ignored").unwrap();
     let dirs = [dir];
 
-    assert!(discover_endpoint_plugin_in(&dirs, "fixture-sink")
-        .unwrap()
-        .is_none());
+    assert!(
+        discover_endpoint_plugin_in(&dirs, "fixture-sink")
+            .unwrap()
+            .is_none()
+    );
     assert!(
         get_endpoint_factory("fixture").is_none(),
         "a route's lookup loaded a library it did not name"

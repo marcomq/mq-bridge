@@ -2,8 +2,9 @@
 
 use mq_bridge::endpoints::aws::{AwsConsumer, AwsPublisher};
 use mq_bridge::test_utils::{
-    add_performance_result, run_direct_perf_test, run_performance_pipeline_test,
-    run_test_with_docker, run_test_with_docker_controller, setup_logging, PERF_TEST_MESSAGE_COUNT,
+    PERF_TEST_MESSAGE_COUNT, add_performance_result, run_direct_perf_test,
+    run_performance_pipeline_test, run_test_with_docker, run_test_with_docker_controller,
+    setup_logging,
 };
 use std::sync::Arc;
 
@@ -104,7 +105,7 @@ pub async fn test_aws_performance_direct() {
 
 pub async fn test_aws_status() {
     use mq_bridge::traits::{MessageConsumer, MessagePublisher};
-    use tokio::time::{sleep, Duration};
+    use tokio::time::{Duration, sleep};
 
     setup_logging();
     run_test_with_docker_controller(

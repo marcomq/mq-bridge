@@ -10,18 +10,18 @@ mod adapters;
 mod tools;
 
 use super::{bearer, nested, openai_url, with_tls};
+use crate::CanonicalMessage;
 use crate::endpoints::http_bulk::HttpBulkPublisher;
 use crate::errors::{InvalidConfig, PublisherError};
 use crate::models::{HttpBulkConfig, LlmAgentConfig, LlmAnswer, LlmProvider};
 use crate::outcomes::{Sent, SentBatch};
 use crate::support::interpolation::CompiledTemplate;
 use crate::traits::{CustomEndpointFactory, MessageConsumer, MessagePublisher};
-use crate::CanonicalMessage;
 use adapters::{ToolResult, Usage};
-use anyhow::{anyhow, bail, Context};
+use anyhow::{Context, anyhow, bail};
 use async_trait::async_trait;
 use futures::{StreamExt, TryStreamExt};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use tools::Tools;
 
 const DEFAULT_MAX_ROUNDS: u32 = 8;
@@ -418,15 +418,19 @@ mod tests {
             json!({"role": "tool", "tool_call_id": "a", "content": "sunny"})
         );
         assert_eq!(messages[4]["tool_call_id"], "b");
-        assert!(messages[4]["content"]
-            .as_str()
-            .unwrap()
-            .contains("no tool `missing`"));
+        assert!(
+            messages[4]["content"]
+                .as_str()
+                .unwrap()
+                .contains("no tool `missing`")
+        );
         assert_eq!(messages[5]["tool_call_id"], "call_2");
-        assert!(messages[5]["content"]
-            .as_str()
-            .unwrap()
-            .contains("not JSON"));
+        assert!(
+            messages[5]["content"]
+                .as_str()
+                .unwrap()
+                .contains("not JSON")
+        );
     }
 
     #[tokio::test]

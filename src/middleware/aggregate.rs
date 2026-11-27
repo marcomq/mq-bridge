@@ -5,18 +5,18 @@
 
 //! Keeps one state document per key in this process and updates it with every message.
 
-use crate::middleware::raw_json::{write_at, RawPairs};
+use crate::CanonicalMessage;
+use crate::middleware::raw_json::{RawPairs, write_at};
 use crate::models::{AggregateConsistency, AggregateEmit, AggregateMiddleware, AggregateOnError};
 use crate::support::interpolation::CompiledTemplate;
 use crate::traits::{
     BatchCommitFunc, BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
     MessagePublisher, PublisherError, ReceivedBatch, Sent, SentBatch,
 };
-use crate::CanonicalMessage;
 use anyhow::Context;
 use async_trait::async_trait;
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use serde_json::Value;
 use states::States;
 use std::any::Any;
@@ -31,7 +31,7 @@ use writer::Writer;
 use zen_expression::compiler::{FetchFastTarget, Opcode};
 use zen_expression::variable::{Symbol, VariableMap};
 use zen_expression::vm::VM;
-use zen_expression::{compile_expression, expression::Standard, Expression, Variable};
+use zen_expression::{Expression, Variable, compile_expression, expression::Standard};
 
 mod states;
 pub(crate) mod store;

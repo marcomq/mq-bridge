@@ -14,8 +14,8 @@ use mq_bridge::{CanonicalMessage, Route};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::any::Any;
 use std::io::Write;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// Counts every allocation in this binary, for the per-message budgets below.

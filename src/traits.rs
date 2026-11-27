@@ -3,9 +3,9 @@
 //  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
+use crate::CanonicalMessage;
 pub use crate::errors::{ConsumerError, HandlerError, PublisherError};
 pub use crate::outcomes::{Handled, Passthrough, Received, ReceivedBatch, Sent, SentBatch};
-use crate::CanonicalMessage;
 use anyhow::anyhow;
 use async_trait::async_trait;
 pub use futures::future::BoxFuture;
@@ -333,7 +333,7 @@ pub trait MessageConsumer: Send + Sync {
     /// This method must be implemented by all consumers.
     /// If in doubt, implement `receive_batch` to return a single message as a vector.
     async fn receive_batch(&mut self, _max_messages: usize)
-        -> Result<ReceivedBatch, ConsumerError>;
+    -> Result<ReceivedBatch, ConsumerError>;
 
     /// Receives a single message.
     async fn receive(&mut self) -> Result<Received, ConsumerError> {
@@ -492,7 +492,10 @@ pub trait MessagePublisher: Send + Sync + 'static {
         match self.send_batch(vec![message]).await {
             Ok(SentBatch::Ack) => {
                 if expects_reply {
-                    warn!("Message {:032x} expected a reply (reply_to set), but publisher returned Ack. Response loop might be broken.", message_id);
+                    warn!(
+                        "Message {:032x} expected a reply (reply_to set), but publisher returned Ack. Response loop might be broken.",
+                        message_id
+                    );
                 }
                 Ok(Sent::Ack)
             }
@@ -506,7 +509,10 @@ pub trait MessagePublisher: Send + Sync + 'static {
                     Ok(Sent::Response(res))
                 } else {
                     if expects_reply {
-                        warn!("Message {:032x} expected a reply (reply_to set), but publisher returned Ack. Response loop might be broken.", message_id);
+                        warn!(
+                            "Message {:032x} expected a reply (reply_to set), but publisher returned Ack. Response loop might be broken.",
+                            message_id
+                        );
                     }
                     Ok(Sent::Ack)
                 }
@@ -895,8 +901,8 @@ pub async fn send_batch_helper<P: MessagePublisher + ?Sized>(
     publisher: &P,
     messages: Vec<CanonicalMessage>,
     callback: impl for<'a> Fn(&'a P, CanonicalMessage) -> BoxFuture<'a, Result<Sent, PublisherError>>
-        + Send
-        + Sync,
+    + Send
+    + Sync,
 ) -> Result<SentBatch, PublisherError> {
     use futures::stream::StreamExt;
 
@@ -990,8 +996,8 @@ mod tests {
     use crate::CanonicalMessage;
     use anyhow::anyhow;
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     };
 
     /// Fails on the message whose payload is `poison`, with a configurable error kind.

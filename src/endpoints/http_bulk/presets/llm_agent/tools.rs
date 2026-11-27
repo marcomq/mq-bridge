@@ -6,20 +6,20 @@
 //! The tools of an `llm_agent`: endpoints that answer, and the tools of MCP servers.
 
 use super::adapters::{ToolCall, ToolResult, ToolSpec};
+use crate::CanonicalMessage;
 use crate::endpoints::create_publisher_from_route;
 use crate::errors::PublisherError;
 use crate::middleware::lookup::answer_of;
 use crate::models::{LlmMcpServer, LlmTool, TlsConfig};
 use crate::outcomes::Sent;
 use crate::traits::MessagePublisher;
-use crate::CanonicalMessage;
-use anyhow::{anyhow, bail, Context};
+use anyhow::{Context, anyhow, bail};
 use rmcp::model::CallToolRequestParams;
 use rmcp::service::RunningService;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
 use rmcp::{RoleClient, ServiceExt};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;

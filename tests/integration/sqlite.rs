@@ -3,8 +3,8 @@
 
 use mq_bridge::endpoints::sqlx::{SqlxConsumer, SqlxPublisher};
 use mq_bridge::test_utils::{
-    add_performance_result, run_direct_perf_test, run_performance_pipeline_test, run_pipeline_test,
-    setup_logging, PERF_TEST_MESSAGE_COUNT,
+    PERF_TEST_MESSAGE_COUNT, add_performance_result, run_direct_perf_test,
+    run_performance_pipeline_test, run_pipeline_test, setup_logging,
 };
 use std::sync::Arc;
 

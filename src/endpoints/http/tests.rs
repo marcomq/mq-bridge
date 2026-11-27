@@ -330,16 +330,20 @@ fn test_compress_decompress_round_trip_gzip_reuses_encoder() {
 fn test_decompress_tells_an_oversized_body_from_a_malformed_one() {
     let gzipped = Bytes::from(gzip_http(&[b'x'; 4096]).unwrap());
     let too_large = decompress_if_needed(gzipped.clone(), Some("gzip"), 4095).unwrap_err();
-    assert!(too_large
-        .downcast_ref::<DecompressedBodyTooLarge>()
-        .is_some());
+    assert!(
+        too_large
+            .downcast_ref::<DecompressedBodyTooLarge>()
+            .is_some()
+    );
     assert!(decompress_if_needed(gzipped, Some("gzip"), 4096).is_ok());
 
     let malformed =
         decompress_if_needed(Bytes::from_static(b"not gzip"), Some("gzip"), 4096).unwrap_err();
-    assert!(malformed
-        .downcast_ref::<DecompressedBodyTooLarge>()
-        .is_none());
+    assert!(
+        malformed
+            .downcast_ref::<DecompressedBodyTooLarge>()
+            .is_none()
+    );
 }
 
 #[test]
@@ -1853,8 +1857,8 @@ fn basic_credentials(user_pass: &str) -> String {
     format!("Basic {}", general_purpose::STANDARD.encode(user_pass))
 }
 
-fn test_http_client(
-) -> hyper_util::client::legacy::Client<HttpConnector, http_body_util::Full<Bytes>> {
+fn test_http_client()
+-> hyper_util::client::legacy::Client<HttpConnector, http_body_util::Full<Bytes>> {
     let mut connector = HttpConnector::new();
     connector.set_nodelay(true);
     hyper_util::client::legacy::Client::builder(TokioExecutor::new()).build(connector)
@@ -1918,8 +1922,10 @@ async fn handler_message_for_request(
 fn test_sensitive_header_prefix_is_reserved_source_metadata() {
     // The design rests on this: publishers drop `mqb.src.*` when serializing metadata, so the
     // credential reaches the handler but never a sink or a response header.
-    assert!(SENSITIVE_HEADER_METADATA_PREFIX
-        .starts_with(crate::canonical_message::SOURCE_METADATA_PREFIX));
+    assert!(
+        SENSITIVE_HEADER_METADATA_PREFIX
+            .starts_with(crate::canonical_message::SOURCE_METADATA_PREFIX)
+    );
     assert!(crate::canonical_message::is_source_metadata_key(&format!(
         "{SENSITIVE_HEADER_METADATA_PREFIX}authorization"
     )));

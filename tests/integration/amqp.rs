@@ -2,10 +2,9 @@
 
 use mq_bridge::endpoints::amqp::{AmqpConsumer, AmqpPublisher};
 use mq_bridge::test_utils::{
-    add_performance_result, run_chaos_pipeline_test, run_direct_perf_test,
+    PERF_TEST_MESSAGE_COUNT, add_performance_result, run_chaos_pipeline_test, run_direct_perf_test,
     run_performance_pipeline_test, run_pipeline_test, run_test_with_docker,
     run_test_with_docker_controller, setup_logging, should_run, verify_subscriber_logic,
-    PERF_TEST_MESSAGE_COUNT,
 };
 use std::sync::Arc;
 
@@ -240,10 +239,10 @@ async fn test_amqp_publisher_handles_disconnect() {
     if !should_run("amqp") {
         return;
     }
+    use mq_bridge::Route;
     use mq_bridge::models::{
         Endpoint, EndpointType, FaultMode, Middleware, RandomPanicMiddleware, RetryMiddleware,
     };
-    use mq_bridge::Route;
 
     setup_logging();
     run_test_with_docker("tests/integration/docker-compose/amqp.yml", || async {
@@ -367,7 +366,7 @@ pub async fn test_amqp_performance_direct() {
 
 pub async fn test_amqp_status() {
     use mq_bridge::traits::{MessageConsumer, MessagePublisher};
-    use tokio::time::{sleep, Duration};
+    use tokio::time::{Duration, sleep};
 
     setup_logging();
     run_test_with_docker_controller(
@@ -449,8 +448,8 @@ pub async fn test_amqp_status() {
 /// the publisher set no `message_id` property and the consumer fell back to the delivery tag,
 /// which restarts at 1 per channel.
 pub async fn test_amqp_message_id_round_trip() {
-    use mq_bridge::traits::{MessageConsumer, MessageDisposition, MessagePublisher};
     use mq_bridge::CanonicalMessage;
+    use mq_bridge::traits::{MessageConsumer, MessageDisposition, MessagePublisher};
     setup_logging();
     run_test_with_docker("tests/integration/docker-compose/amqp.yml", || async {
         let config = mq_bridge::models::AmqpConfig {

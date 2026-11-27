@@ -1,14 +1,14 @@
 //! `columns: auto`: write each top-level JSON field into the table column of the same name.
 
 use super::{
-    audited_sql, bind_key, bind_value, classify_sql_error, copy_rows, copy_rows_on, invalid,
-    load::HeldTx, open_copy_pool, positional_placeholder, push_copy_value, quote_ident_for,
-    AnyQuery, BindValue, CopyPool, MYSQL_COLUMN_TYPES_SQL, SQLITE_COLUMN_TYPES_SQL,
+    AnyQuery, BindValue, CopyPool, MYSQL_COLUMN_TYPES_SQL, SQLITE_COLUMN_TYPES_SQL, audited_sql,
+    bind_key, bind_value, classify_sql_error, copy_rows, copy_rows_on, invalid, load::HeldTx,
+    open_copy_pool, positional_placeholder, push_copy_value, quote_ident_for,
 };
+use crate::CanonicalMessage;
 use crate::models::SqlxConfig;
 use crate::outcomes::SentBatch;
 use crate::traits::PublisherError;
-use crate::CanonicalMessage;
 use anyhow::anyhow;
 use serde::de::{Deserialize, Deserializer, MapAccess, Visitor};
 use sqlx::{AnyPool, Row};
@@ -29,8 +29,7 @@ const SQL_CACHE_BYTES: usize = 8 << 20;
 type SqlShape = (Vec<usize>, usize, Vec<PgBind>);
 
 /// `format_type` gives a name a cast accepts, without the length a cast would truncate to.
-const PG_COLUMN_CASTS_SQL: &str =
-    "SELECT a.attname::text AS name, format_type(a.atttypid, NULL) AS typname \
+const PG_COLUMN_CASTS_SQL: &str = "SELECT a.attname::text AS name, format_type(a.atttypid, NULL) AS typname \
      FROM pg_attribute a \
      WHERE a.attrelid = $1::regclass AND a.attnum > 0 AND NOT a.attisdropped \
      ORDER BY a.attnum";
@@ -287,7 +286,7 @@ impl AutoColumns {
             other => {
                 return Err(invalid(format!(
                     "`columns: auto` is not supported for {other}; use an `insert_query`"
-                )))
+                )));
             }
         };
         let mut query = sqlx::query(sql);
@@ -304,7 +303,7 @@ impl AutoColumns {
                 Vec::new()
             }
             Err(e) => {
-                return Err(anyhow!(e).context(format!("reading the columns of table '{table}'")))
+                return Err(anyhow!(e).context(format!("reading the columns of table '{table}'")));
             }
         };
         if rows.is_empty() {
@@ -367,13 +366,13 @@ impl AutoColumns {
                 Some(index) => extra = Some(*index),
                 None => {
                     return Err(invalid(format!(
-                    "`{option}` column '{name}' is not a column of table '{table}' (columns: {})",
-                    columns
-                        .iter()
-                        .map(|c| c.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )))
+                        "`{option}` column '{name}' is not a column of table '{table}' (columns: {})",
+                        columns
+                            .iter()
+                            .map(|c| c.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )));
                 }
             }
         }
@@ -462,7 +461,7 @@ impl AutoColumns {
             _ => {
                 return Err(PublisherError::NonRetryable(anyhow!(
                     "`columns: auto` needs a JSON object as payload"
-                )))
+                )));
             }
         };
         // Per column: the value, and the field name when it matched only by case.

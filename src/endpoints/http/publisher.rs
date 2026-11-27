@@ -369,12 +369,12 @@ impl HttpPublisher {
                 return Err(PublisherError::Retryable(anyhow::anyhow!(
                     "Failed to read HTTP response body: {}",
                     e
-                )))
+                )));
             }
             Err(_) => {
                 return Err(PublisherError::Retryable(anyhow::anyhow!(
                     "HTTP response body collection timeout"
-                )))
+                )));
             }
         };
 

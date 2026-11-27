@@ -8,7 +8,7 @@
 use super::dynamic::reject_unsupported_call_metadata;
 use super::proto;
 use super::{
-    bridge_to_canonical, configured_client, make_endpoint, GRPC_ACK_CONCURRENCY, GRPC_BATCH_POLL_MS,
+    GRPC_ACK_CONCURRENCY, GRPC_BATCH_POLL_MS, bridge_to_canonical, configured_client, make_endpoint,
 };
 use crate::models::GrpcConfig;
 use crate::traits::{ConsumerError, MessageConsumer, MessageDisposition};
@@ -20,8 +20,8 @@ use proto::{BridgeMessage, SubscribeRequest};
 use std::any::Any;
 use std::collections::HashMap;
 use std::time::Duration;
-use tonic::transport::Channel;
 use tonic::Request;
+use tonic::transport::Channel;
 use tracing::{debug, error, info, trace, warn};
 
 use super::dynamic::DynamicConsumer;

@@ -1,7 +1,7 @@
 #![allow(dead_code, unused)]
 
 use mq_bridge::test_utils::{
-    run_performance_pipeline_test_named, setup_logging, PERF_TEST_MESSAGE_COUNT,
+    PERF_TEST_MESSAGE_COUNT, run_performance_pipeline_test_named, setup_logging,
 };
 use std::env;
 use std::time::Duration;

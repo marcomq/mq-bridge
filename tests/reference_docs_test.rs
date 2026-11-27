@@ -283,10 +283,10 @@ async fn wrong_side_middleware_matches_documented_behaviour() {
 /// anything else depends on it, and it is the reverse of the consumer side.
 #[tokio::test]
 async fn publisher_middleware_wraps_last_entry_outermost() {
+    use mq_bridge::CanonicalMessage;
     use mq_bridge::models::{
         DeadLetterQueueMiddleware, EndpointType, FaultMode, RandomPanicMiddleware,
     };
-    use mq_bridge::CanonicalMessage;
 
     // `enabled` must be set explicitly: the derived Default is false, while the serde
     // default used when parsing YAML is true.

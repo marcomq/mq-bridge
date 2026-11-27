@@ -9,9 +9,10 @@
 //! the whole text is the message's response, so the input is committed after it.
 //! A message on `cancel_from` with a request's `correlation_id` stops that request.
 
-use super::publisher::{scalar_text, Failure};
+use super::publisher::{Failure, scalar_text};
 use super::query::Query;
-use super::{quoted, Connection};
+use super::{Connection, quoted};
+use crate::CanonicalMessage;
 use crate::models::{HttpBulkConfig, HttpBulkQuery};
 use crate::stream_caller::{
     CORRELATION_ID, STREAM_ATTEMPT, STREAM_END, STREAM_INDEX, STREAM_REQUEST, STREAM_STATUS,
@@ -22,11 +23,10 @@ use crate::support::sse::{find_sse_event_end, parse_sse_event};
 use crate::traits::{
     ConsumerError, MessageConsumer, MessageDisposition, MessagePublisher, PublisherError, SentBatch,
 };
-use crate::CanonicalMessage;
-use anyhow::{anyhow, bail, Context};
+use anyhow::{Context, anyhow, bail};
 use async_trait::async_trait;
 use futures::{FutureExt, StreamExt};
-use reqwest::header::{HeaderValue, ACCEPT, CONTENT_TYPE};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderValue};
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::panic::AssertUnwindSafe;
@@ -291,12 +291,12 @@ impl StreamQueryPublisher {
             End::Failed(reason) => {
                 return Err(PublisherError::Retryable(anyhow!(
                     "{label} stream broke off: {reason}"
-                )))
+                )));
             }
             End::Refused(reason) => {
                 return Err(PublisherError::NonRetryable(anyhow!(
                     "{label} refused the request: {reason}"
-                )))
+                )));
             }
             _ => {}
         }
@@ -646,12 +646,12 @@ impl MessagePublisher for StreamQueryPublisher {
 
 #[cfg(test)]
 mod tests {
+    use crate::CanonicalMessage;
     use crate::endpoints::http_bulk::builtin_preset;
-    use crate::endpoints::memory::{get_or_create_channel, MemoryChannel};
+    use crate::endpoints::memory::{MemoryChannel, get_or_create_channel};
     use crate::models::MemoryConfig;
     use crate::traits::{MessagePublisher, PublisherError, Sent};
-    use crate::CanonicalMessage;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;

@@ -62,15 +62,15 @@ fn a_grpc_status_is_an_authentication_failure_only_when_unauthenticated() {
         tonic::Status::unavailable("ACCESS_REFUSED - Login was refused")
     )));
 }
+use crate::CanonicalMessage;
 use crate::models::{
     Endpoint, EndpointType, FaultMode, FileConfig, MemoryConfig, Middleware, MongoDbConfig, NameBy,
     RandomPanicMiddleware, RouteOptions, SqlxConfig,
 };
 use crate::traits::{CustomMiddlewareFactory, MessageConsumer, MessagePublisher, ReceivedBatch};
-use crate::CanonicalMessage;
 use std::any::Any;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 #[test]
@@ -775,10 +775,12 @@ fn test_random_panic_requires_fault_injection_opt_in() {
 
     let err = route.check("fault_policy", None).unwrap_err().to_string();
     assert!(err.contains("allow_fault_injection"));
-    assert!(route
-        .with_fault_injection(true)
-        .check("fault_policy", None)
-        .is_ok());
+    assert!(
+        route
+            .with_fault_injection(true)
+            .check("fault_policy", None)
+            .is_ok()
+    );
 }
 
 #[derive(Debug, Default)]
@@ -2091,7 +2093,9 @@ async fn test_route_sequencer_deadlock_fix() {
             );
         }
         Err(_) => {
-            panic!("Route deadlocked! The sequencer likely didn't receive the Nack for the failed batch.");
+            panic!(
+                "Route deadlocked! The sequencer likely didn't receive the Nack for the failed batch."
+            );
         }
     }
 }
@@ -3797,10 +3801,10 @@ async fn referenced_http_input_survives_transient_sink_failure_sequentially_and_
                     )
                 });
             assert_eq!(
-                    response.status(),
-                    reqwest::StatusCode::BAD_GATEWAY,
-                    "concurrency {concurrency} request {attempt} should receive a request-level failure"
-                );
+                response.status(),
+                reqwest::StatusCode::BAD_GATEWAY,
+                "concurrency {concurrency} request {attempt} should receive a request-level failure"
+            );
             assert_eq!(
                 handle.outcome(),
                 None,

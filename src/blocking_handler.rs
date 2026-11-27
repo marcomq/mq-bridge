@@ -42,9 +42,9 @@ use crate::{CanonicalMessage, Publisher};
 use anyhow::anyhow;
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use tokio::sync::oneshot;
 
 const CORRELATION_ID_KEY: &str = "correlation_id";

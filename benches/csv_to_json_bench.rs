@@ -6,7 +6,7 @@
 //! CSV quotes and whose inner quotes it doubles. That column is the reason the
 //! quoted-field path matters as much as the plain one.
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use mq_bridge::test_utils::bench::{csv_batch_decode, csv_records_to_json};
 
 const ROWS: usize = 20_000;

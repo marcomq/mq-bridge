@@ -369,10 +369,10 @@ async fn test_clickhouse_contract() {
 #[tokio::test]
 #[ignore = "requires docker compose"]
 async fn test_object_store_contract() {
-    use ::object_store::{path::Path, ObjectStore, ObjectStoreExt};
+    use ::object_store::{ObjectStore, ObjectStoreExt, path::Path};
     use futures::TryStreamExt;
 
-    use super::object_store::{ensure_bucket, BUCKET, ENDPOINT};
+    use super::object_store::{BUCKET, ENDPOINT, ensure_bucket};
 
     if !mq_bridge::test_utils::should_run("object_store") {
         return;

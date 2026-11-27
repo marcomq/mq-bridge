@@ -38,12 +38,12 @@
 //! `drain_on_read: false` reader, and `PRINTCOMPLETE` the ack that deletes a chunk. See
 //! `docs/CONFIGURATION.md` (Directory spool → Further reading) for the sources.
 
+use crate::CanonicalMessage;
 use crate::models::{DirSpoolConfig, SpoolFsync};
 use crate::traits::{
     BoxFuture, ConsumerError, DisconnectOutcome, MessageConsumer, MessageDisposition,
     MessagePublisher, PublisherError, ReceivedBatch, SentBatch,
 };
-use crate::CanonicalMessage;
 use anyhow::Context;
 use async_trait::async_trait;
 use std::any::Any;
@@ -1280,7 +1280,7 @@ impl DirSpoolConsumer {
                 return Err(anyhow::Error::new(error).context(format!(
                     "Failed to list dir_spool directory: {}",
                     path.display()
-                )))
+                )));
             }
         };
         self.scans += 1;
@@ -1766,7 +1766,7 @@ async fn highest_sequence(
                 return Err(anyhow::Error::new(error).context(format!(
                     "Failed to list dir_spool directory: {}",
                     path.display()
-                )))
+                )));
             }
         };
         let mut highest: Option<u64> = None;

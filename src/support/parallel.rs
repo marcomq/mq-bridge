@@ -76,20 +76,24 @@ impl Pool {
             let shared = std::sync::Arc::clone(&shared);
             std::thread::Builder::new()
                 .name("mqb-decode".to_string())
-                .spawn(move || loop {
-                    let job = {
-                        let mut queue = shared.queue.lock().unwrap_or_else(|e| e.into_inner());
-                        loop {
-                            match queue.pop_front() {
-                                Some(job) => break job,
-                                None => {
-                                    queue =
-                                        shared.ready.wait(queue).unwrap_or_else(|e| e.into_inner())
+                .spawn(move || {
+                    loop {
+                        let job = {
+                            let mut queue = shared.queue.lock().unwrap_or_else(|e| e.into_inner());
+                            loop {
+                                match queue.pop_front() {
+                                    Some(job) => break job,
+                                    None => {
+                                        queue = shared
+                                            .ready
+                                            .wait(queue)
+                                            .unwrap_or_else(|e| e.into_inner())
+                                    }
                                 }
                             }
-                        }
-                    };
-                    job();
+                        };
+                        job();
+                    }
                 })
                 .expect("decode worker thread");
         }

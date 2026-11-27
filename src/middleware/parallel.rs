@@ -10,15 +10,15 @@
 //! batches in source order, because the order is enforced at the marker instead of the route.
 
 use super::buffer::merge_commits;
-use super::deferred_commit::{run_all, run_all_keeping_nacks, DeferredCommits};
+use super::deferred_commit::{DeferredCommits, run_all, run_all_keeping_nacks};
 use super::served_by_plugin;
+use crate::CanonicalMessage;
 use crate::errors::InvalidConfig;
 use crate::models::{Middleware, ParallelMiddleware};
 use crate::traits::{
     BatchCommitFunc, BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
     MessagePublisher, PublisherError, ReceivedBatch, Sent, SentBatch,
 };
-use crate::CanonicalMessage;
 use async_trait::async_trait;
 use std::any::Any;
 use std::cell::Cell;
@@ -640,8 +640,8 @@ impl MessagePublisher for TurnPublisher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{Endpoint, Route};
     use crate::CanonicalMessage;
+    use crate::models::{Endpoint, Route};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
@@ -870,9 +870,11 @@ mod tests {
         assert!(!commits.is_empty(), "nothing read ahead");
         for (first, dispositions) in commits {
             assert!(first > 0, "the handed-out batch belongs to the route");
-            assert!(dispositions
-                .iter()
-                .all(|d| matches!(d, MessageDisposition::Nack)));
+            assert!(
+                dispositions
+                    .iter()
+                    .all(|d| matches!(d, MessageDisposition::Nack))
+            );
         }
     }
 

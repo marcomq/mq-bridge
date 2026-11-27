@@ -1,31 +1,31 @@
+use crate::APP_NAME;
+use crate::CanonicalMessage;
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::{MqttConfig, MqttProtocol};
 use crate::traits::{
     BoxFuture, ConsumerError, MessageConsumer, MessageDisposition, MessagePublisher,
     PublisherError, Received, ReceivedBatch, Sent, SentBatch,
 };
-use crate::CanonicalMessage;
-use crate::APP_NAME;
 use anyhow::anyhow;
-use async_channel::{bounded, Receiver, Sender};
+use async_channel::{Receiver, Sender, bounded};
 use async_trait::async_trait;
-use rumqttc::v5::mqttbytes::v5::{Publish as PublishV5, PublishProperties};
+use rumqttc::Publish as PublishV3;
 use rumqttc::v5::mqttbytes::QoS as QoSV5;
+use rumqttc::v5::mqttbytes::v5::{Publish as PublishV5, PublishProperties};
 use rumqttc::v5::{
     AsyncClient as AsyncClientV5, EventLoop as EventLoopV5, MqttOptions as MqttOptionsV5,
 };
-use rumqttc::Publish as PublishV3;
-use rumqttc::{tokio_rustls::rustls, AsyncClient, MqttOptions, QoS, Transport};
+use rumqttc::{AsyncClient, MqttOptions, QoS, Transport, tokio_rustls::rustls};
 use std::any::Any;
 use std::collections::HashSet;
 use std::fmt::Debug;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
-use tokio::sync::watch;
 use tokio::sync::Notify;
 use tokio::sync::RwLock;
+use tokio::sync::mpsc;
+use tokio::sync::watch;
 use tracing::{debug, error, info, trace, warn};
 
 #[derive(Clone)]
@@ -324,12 +324,12 @@ impl MessagePublisher for MqttPublisher {
                 return Err(PublisherError::Connection(anyhow!(
                     "Failed to publish MQTT message: {}",
                     e
-                )))
+                )));
             }
             Err(_) => {
                 return Err(PublisherError::Connection(anyhow!(
                     "MQTT publish timed out"
-                )))
+                )));
             }
         }
 
@@ -413,7 +413,9 @@ impl MessagePublisher for MqttPublisher {
             );
         }
         if confirmation_failed {
-            warn!("MQTT batch publish not confirmed by broker before timeout, marking enqueued messages for retry");
+            warn!(
+                "MQTT batch publish not confirmed by broker before timeout, marking enqueued messages for retry"
+            );
         }
 
         if first_error.is_some() || confirmation_failed {
@@ -473,7 +475,9 @@ impl MqttConsumer {
         });
 
         let listener = MqttListener::new(config, topic, &client_id, "consumer").await?;
-        info!("Known issue: Messages might be lost in rare cases if the MQTT broker is restarted while the consumer is running.");
+        info!(
+            "Known issue: Messages might be lost in rare cases if the MQTT broker is restarted while the consumer is running."
+        );
         Ok(Self(listener))
     }
 }
@@ -831,7 +835,9 @@ impl MessageConsumer for MqttListener {
                 if dispositions.len() != reply_infos.len() || dispositions.len() != acks.len() {
                     return Err(anyhow!(
                         "MQTT batch commit: mismatched lengths: dispositions={}, reply_infos={}, acks={}",
-                        dispositions.len(), reply_infos.len(), acks.len()
+                        dispositions.len(),
+                        reply_infos.len(),
+                        acks.len()
                     ));
                 }
                 let mut ack_futures = Vec::with_capacity(dispositions.len());
@@ -1366,7 +1372,9 @@ async fn build_tls_config(config: &MqttConfig) -> anyhow::Result<rustls::ClientC
     };
 
     if config.tls.accept_invalid_certs {
-        warn!("MQTT TLS is configured to accept invalid certificates. This is insecure and should not be used in production.");
+        warn!(
+            "MQTT TLS is configured to accept invalid certificates. This is insecure and should not be used in production."
+        );
         let mut dangerous_config = client_config.dangerous();
         let schemes = crate::endpoints::get_crypto_provider()?
             .signature_verification_algorithms

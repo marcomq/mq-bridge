@@ -1,5 +1,5 @@
-use crate::traits::{MessagePublisher, PublisherError, Sent, SentBatch};
 use crate::CanonicalMessage;
+use crate::traits::{MessagePublisher, PublisherError, Sent, SentBatch};
 use async_trait::async_trait;
 use std::any::Any;
 

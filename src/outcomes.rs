@@ -1,6 +1,6 @@
+use crate::CanonicalMessage;
 use crate::errors::PublisherError;
 use crate::traits::{BatchCommitFunc, CommitFunc};
-use crate::CanonicalMessage;
 
 /// The outcome of a successful command handling operation.
 #[derive(Debug)]
@@ -182,9 +182,11 @@ mod tests {
             commit: Box::new(|dispositions| {
                 Box::pin(async move {
                     assert_eq!(dispositions.len(), 2);
-                    assert!(dispositions
-                        .into_iter()
-                        .all(|disposition| matches!(disposition, MessageDisposition::Ack)));
+                    assert!(
+                        dispositions
+                            .into_iter()
+                            .all(|disposition| matches!(disposition, MessageDisposition::Ack))
+                    );
                     Ok(())
                 })
             }),

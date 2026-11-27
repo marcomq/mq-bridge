@@ -1,3 +1,4 @@
+use crate::CanonicalMessage;
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::{CaRoots, MongoDbConfig, MongoDbFormat};
 use crate::support::interpolation::CompiledTemplate;
@@ -5,23 +6,22 @@ use crate::traits::{
     BatchCommitFunc, BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
     MessagePublisher, PublisherError, Received, ReceivedBatch, Sent, SentBatch,
 };
-use crate::CanonicalMessage;
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use async_trait::async_trait;
 use futures::StreamExt;
+use mongodb::{Client, Collection, Database};
 use mongodb::{
-    bson::{doc, to_bson, to_document, Bson, Document},
+    IndexModel,
+    change_stream::event::{ChangeStreamEvent, OperationType, ResumeToken},
+};
+use mongodb::{
+    bson::{Bson, Document, doc, to_bson, to_document},
     change_stream::ChangeStream,
     error::ErrorKind,
     options::{
         FindOneAndUpdateOptions, FindOptions, FullDocumentType, ReturnDocument, UpdateOptions,
     },
 };
-use mongodb::{
-    change_stream::event::{ChangeStreamEvent, OperationType, ResumeToken},
-    IndexModel,
-};
-use mongodb::{Client, Collection, Database};
 use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::collections::HashMap;
@@ -50,7 +50,7 @@ pub(crate) use dedup::build_mongo_dedup_store;
 pub(crate) use readers::{change_stream_checkpoint, is_change_stream_unsupported};
 // Referenced only by the unit tests below.
 #[cfg(test)]
-pub(crate) use publisher::{tag_outcome, OUTCOME_EXISTED, OUTCOME_INSERTED, OUTCOME_KEY};
+pub(crate) use publisher::{OUTCOME_EXISTED, OUTCOME_INSERTED, OUTCOME_KEY, tag_outcome};
 #[cfg(test)]
 pub(crate) use readers::{decode_resume_token, encode_resume_token, full_document_match};
 
@@ -457,7 +457,9 @@ async fn create_client(config: &MongoDbConfig) -> anyhow::Result<Client> {
             tls_options.cert_key_file_path = Some(std::path::PathBuf::from(cert_file));
         }
         if config.tls.key_file.is_some() {
-            tracing::warn!("MongoDB TLS configuration: 'key_file' is ignored. The private key must be included in the 'cert_file' (PEM format).");
+            tracing::warn!(
+                "MongoDB TLS configuration: 'key_file' is ignored. The private key must be included in the 'cert_file' (PEM format)."
+            );
         }
         if let Some(cert_password) = &config.tls.cert_password {
             tls_options.tls_certificate_key_file_password = Some(cert_password.as_bytes().to_vec());

@@ -16,23 +16,23 @@ use crate::{
         PublisherError, ReceivedBatch,
     },
 };
-use mqi::attribute::{InqResItem, SetItems, MQIA_CURRENT_Q_DEPTH, MQIA_MAX_Q_DEPTH};
+use mqi::attribute::{InqResItem, MQIA_CURRENT_Q_DEPTH, MQIA_MAX_Q_DEPTH, SetItems};
 use mqi::{
+    MqStr, Object, Subscription, Syncpoint,
     connection::{AsConnection, Credentials, MqServer, ThreadNone, Tls},
     constants, get, mqstr, open,
     result::ResultCompErrExt,
-    types::{ApplName, CipherSpec, KeyRepo, MessageId, QueueManagerName, QueueName, FORMAT_NONE},
-    MqStr, Object, Subscription, Syncpoint,
+    types::{ApplName, CipherSpec, FORMAT_NONE, KeyRepo, MessageId, QueueManagerName, QueueName},
 };
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     thread,
     time::Duration,
 };
-use tokio::sync::{mpsc, oneshot, Semaphore};
+use tokio::sync::{Semaphore, mpsc, oneshot};
 use tracing::{debug, info, trace, warn};
 
 // Module-level constants
@@ -476,7 +476,9 @@ impl IbmMqPublisher {
                     // This means the loop exited because the rx channel was closed.
                     // This happens when the IbmMqPublisher struct is dropped.
                     // We should backout any transaction that might be open.
-                    info!("IBM MQ publisher channel closed, backing out any active transaction before exiting thread.");
+                    info!(
+                        "IBM MQ publisher channel closed, backing out any active transaction before exiting thread."
+                    );
                     backout_with_logging!(&qm, "on channel close");
                     break;
                 }

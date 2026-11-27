@@ -13,16 +13,16 @@
 //! under `mqb_message_id`; every remaining metadata entry becomes its own field,
 //! so messages stay readable by any other Redis client.
 
+use crate::APP_NAME;
+use crate::CanonicalMessage;
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::{CaRoots, RedisStreamsConfig};
 use crate::traits::{
     BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
     MessagePublisher, PublisherError, ReceivedBatch, SentBatch,
 };
-use crate::CanonicalMessage;
-use crate::APP_NAME;
 use anyhow::anyhow;
-use async_channel::{bounded, Receiver, Sender};
+use async_channel::{Receiver, Sender, bounded};
 use async_trait::async_trait;
 use redis::aio::{ConnectionManager, ConnectionManagerConfig};
 use redis::streams::{
@@ -31,8 +31,8 @@ use redis::streams::{
 use redis::{AsyncCommands, IntoConnectionInfo};
 use std::any::Any;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tracing::{trace, warn};
 
@@ -126,7 +126,7 @@ fn open_client(config: &RedisStreamsConfig) -> anyhow::Result<redis::Client> {
         _ => {
             return Err(anyhow!(
                 "redis_streams tls needs both cert_file and key_file for a client certificate"
-            ))
+            ));
         }
     };
     redis::Client::build_with_tls(

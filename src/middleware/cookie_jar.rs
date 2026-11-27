@@ -1,9 +1,9 @@
+use crate::CanonicalMessage;
 use crate::models::CookieJarMiddleware;
 use crate::traits::{
     BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError, Received,
     ReceivedBatch, Sent, SentBatch,
 };
-use crate::CanonicalMessage;
 use async_trait::async_trait;
 use std::any::Any;
 use std::collections::HashMap;

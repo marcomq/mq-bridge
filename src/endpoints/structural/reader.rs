@@ -1,8 +1,8 @@
+use crate::CanonicalMessage;
 use crate::traits::{
     BoxFuture, ConsumerError, MessageConsumer, MessageDisposition, MessagePublisher,
     PublisherError, Sent, SentBatch,
 };
-use crate::CanonicalMessage;
 use async_trait::async_trait;
 use std::any::Any;
 use std::sync::Arc;
@@ -381,9 +381,11 @@ mod tests {
             SentBatch::Ack => panic!("expected read messages to be returned as responses"),
         }
         assert_eq!(commit_log.lock().unwrap().len(), 1);
-        assert!(commit_log.lock().unwrap()[0]
-            .iter()
-            .all(|disposition| matches!(disposition, MessageDisposition::Ack)));
+        assert!(
+            commit_log.lock().unwrap()[0]
+                .iter()
+                .all(|disposition| matches!(disposition, MessageDisposition::Ack))
+        );
     }
 
     /// STRUCT-05: a trigger without a message fails as retryable instead of being acked empty.
@@ -410,9 +412,11 @@ mod tests {
                 failed.iter().map(|(m, _)| m.message_id).collect::<Vec<_>>(),
                 unanswered
             );
-            assert!(failed
-                .iter()
-                .all(|(_, e)| matches!(e, PublisherError::Retryable(_))));
+            assert!(
+                failed
+                    .iter()
+                    .all(|(_, e)| matches!(e, PublisherError::Retryable(_)))
+            );
         }
     }
 

@@ -4,9 +4,9 @@ use std::sync::Arc;
 use super::assert_permanent_consumer_error;
 use mq_bridge::endpoints::nats::{NatsConsumer, NatsPublisher};
 use mq_bridge::test_utils::{
-    add_performance_result, run_direct_perf_test, run_performance_pipeline_test,
-    run_test_with_docker, run_test_with_docker_controller, setup_logging, verify_subscriber_logic,
-    PERF_TEST_MESSAGE_COUNT,
+    PERF_TEST_MESSAGE_COUNT, add_performance_result, run_direct_perf_test,
+    run_performance_pipeline_test, run_test_with_docker, run_test_with_docker_controller,
+    setup_logging, verify_subscriber_logic,
 };
 const CONFIG_YAML: &str = r#"
 routes:
@@ -108,7 +108,7 @@ pub async fn test_nats_performance_direct() {
 
 pub async fn test_nats_status() {
     use mq_bridge::traits::{MessageConsumer, MessagePublisher};
-    use tokio::time::{sleep, Duration};
+    use tokio::time::{Duration, sleep};
 
     setup_logging();
     run_test_with_docker_controller(
@@ -191,8 +191,8 @@ pub async fn test_nats_status() {
 /// its stream's subjects is *accepted* by the server — it just never delivers — so that
 /// variant is silent starvation rather than an error loop.
 pub async fn test_nats_subject_stream_mismatch_fails_fast() {
-    use mq_bridge::models::{Endpoint, EndpointType, NatsConfig};
     use mq_bridge::Route;
+    use mq_bridge::models::{Endpoint, EndpointType, NatsConfig};
 
     setup_logging();
     run_test_with_docker("tests/integration/docker-compose/nats.yml", || async {

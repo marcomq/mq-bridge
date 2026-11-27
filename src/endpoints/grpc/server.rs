@@ -9,7 +9,7 @@
 
 use super::dynamic::{find_method, method_shape, reject_unsupported_call_metadata};
 use super::proto;
-use super::{bridge_to_canonical, canonical_to_bridge, parse_addr, RawProtobufCodec};
+use super::{RawProtobufCodec, bridge_to_canonical, canonical_to_bridge, parse_addr};
 use crate::models::GrpcConfig;
 use crate::traits::{ConsumerError, MessageConsumer, MessageDisposition};
 use anyhow::Result;
@@ -104,11 +104,11 @@ impl<F, M, B> tonic::codegen::Service<tonic::codegen::http::Request<B>> for Pref
 where
     F: tonic::codegen::Service<tonic::codegen::http::Request<B>>,
     M: tonic::codegen::Service<
-        tonic::codegen::http::Request<B>,
-        Response = F::Response,
-        Error = F::Error,
-        Future = F::Future,
-    >,
+            tonic::codegen::http::Request<B>,
+            Response = F::Response,
+            Error = F::Error,
+            Future = F::Future,
+        >,
 {
     type Response = F::Response;
     type Error = F::Error;
@@ -150,11 +150,11 @@ type GrpcResponse = tonic::codegen::http::Response<tonic::body::Body>;
 impl<F, B> tonic::codegen::Service<tonic::codegen::http::Request<B>> for DynamicMethodRouter<F>
 where
     F: tonic::codegen::Service<
-        tonic::codegen::http::Request<B>,
-        Response = GrpcResponse,
-        Error = std::convert::Infallible,
-        Future = tonic::codegen::BoxFuture<GrpcResponse, std::convert::Infallible>,
-    >,
+            tonic::codegen::http::Request<B>,
+            Response = GrpcResponse,
+            Error = std::convert::Infallible,
+            Future = tonic::codegen::BoxFuture<GrpcResponse, std::convert::Infallible>,
+        >,
     B: tonic::codegen::Body + Send + 'static,
     B::Error: Into<tonic::codegen::StdError> + Send + 'static,
 {

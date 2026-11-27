@@ -6,10 +6,10 @@
 //! Descriptor-driven gRPC: an arbitrary method described by a descriptor set or
 //! server reflection is used directly as a route's input or output.
 
-use super::{make_endpoint, GrpcStatusError, RawProtobufCodec, GRPC_BATCH_POLL_MS};
+use super::{GRPC_BATCH_POLL_MS, GrpcStatusError, RawProtobufCodec, make_endpoint};
+use crate::CanonicalMessage;
 use crate::models::GrpcConfig;
 use crate::traits::{ConsumerError, MessageConsumer, MessagePublisher, PublisherError, SentBatch};
-use crate::CanonicalMessage;
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -18,10 +18,10 @@ use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor};
 use sha2::{Digest, Sha256};
 use std::any::Any;
 use std::time::Duration;
-use tonic::metadata::{Ascii, Binary, MetadataKey, MetadataMap, MetadataValue};
-use tonic::transport::Channel;
 use tonic::Request;
 use tonic::Status;
+use tonic::metadata::{Ascii, Binary, MetadataKey, MetadataMap, MetadataValue};
+use tonic::transport::Channel;
 use tracing::warn;
 
 /// Await `call`, failing with a clear error if `deadline` passes first. No deadline
@@ -262,10 +262,10 @@ pub(super) async fn reflected_descriptor_pool(
     service_name: &str,
     deadline: Option<Duration>,
 ) -> Result<DescriptorPool> {
+    use tonic_reflection::pb::v1::ServerReflectionRequest;
     use tonic_reflection::pb::v1::server_reflection_client::ServerReflectionClient;
     use tonic_reflection::pb::v1::server_reflection_request::MessageRequest;
     use tonic_reflection::pb::v1::server_reflection_response::MessageResponse;
-    use tonic_reflection::pb::v1::ServerReflectionRequest;
 
     let reflection_request = ServerReflectionRequest {
         host: String::new(),
@@ -520,7 +520,7 @@ impl MessageConsumer for DynamicConsumer {
                         Err(status) => {
                             return Err(ConsumerError::Connection(anyhow::Error::new(
                                 GrpcStatusError::from(status),
-                            )))
+                            )));
                         }
                     }
                 }
@@ -668,7 +668,7 @@ impl DynamicPublisher {
                             Err(PublisherError::Retryable(anyhow::anyhow!(
                                 "dynamic gRPC call timed out"
                             ))),
-                        )
+                        );
                     }
                 },
                 None => call.await,

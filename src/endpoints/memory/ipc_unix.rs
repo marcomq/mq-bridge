@@ -8,11 +8,11 @@
 use super::framed::{self, FramedIo};
 use super::transport::TransportChannel;
 use crate::CanonicalMessage;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, Notify};
 use tracing::{debug, info, warn};

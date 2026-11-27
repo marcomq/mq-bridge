@@ -6,7 +6,7 @@
 //! SQL-backed state store, selected by a `store:` URL on the `aggregate` middleware.
 
 use super::*;
-use crate::middleware::aggregate::store::{StateStore, StateWrite, MAX_KEY_LEN};
+use crate::middleware::aggregate::store::{MAX_KEY_LEN, StateStore, StateWrite};
 use std::collections::HashMap;
 
 /// Rows per statement; three bind values each stay far below every driver's limit.

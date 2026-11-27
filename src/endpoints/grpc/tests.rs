@@ -18,7 +18,7 @@ mod config {
 mod consumer {
     use super::super::consumer::*;
     use super::super::publisher::GrpcPublisher;
-    use super::super::{proto, BridgeMessage, CanonicalMessage};
+    use super::super::{BridgeMessage, CanonicalMessage, proto};
     use crate::models::{Endpoint, EndpointType, GrpcConfig, Route};
     use crate::traits::{MessageConsumer, MessageDisposition, MessagePublisher, SentBatch};
     use proto::bridge_client::BridgeClient;
@@ -371,17 +371,17 @@ mod consumer {
 }
 
 mod dynamic {
+    use super::super::GrpcStatusError;
     use super::super::consumer::ClientModeConsumer;
     use super::super::dynamic::*;
     use super::super::publisher::GrpcPublisher;
-    use super::super::server::{PrefixRouter, ServerModeConsumer, REFLECTION_V1_PREFIX};
-    use super::super::GrpcStatusError;
+    use super::super::server::{PrefixRouter, REFLECTION_V1_PREFIX, ServerModeConsumer};
+    use crate::CanonicalMessage;
     use crate::models::{GrpcConfig, SecretExtractor, TlsConfig};
     use crate::traits::{
         ConsumerError, MessageConsumer, MessageDisposition, MessagePublisher, PublisherError,
         SentBatch,
     };
-    use crate::CanonicalMessage;
     use std::collections::HashMap;
     use std::time::Duration;
     use tokio_stream::wrappers::TcpListenerStream;
@@ -889,9 +889,11 @@ mod dynamic {
             panic!("expected a failed batch");
         };
         assert_eq!(failed.len(), 2, "batch granularity fails the whole stream");
-        assert!(failed
-            .iter()
-            .all(|(_, error)| matches!(error, PublisherError::NonRetryable(_))));
+        assert!(
+            failed
+                .iter()
+                .all(|(_, error)| matches!(error, PublisherError::NonRetryable(_)))
+        );
         handle.abort();
     }
 
@@ -955,9 +957,11 @@ mod dynamic {
                 .err()
                 .unwrap();
             assert!(error.to_string().contains(shape), "{error:#}");
-            assert!(error
-                .to_string()
-                .contains("supports unary and server-streaming"));
+            assert!(
+                error
+                    .to_string()
+                    .contains("supports unary and server-streaming")
+            );
         }
         handle.abort();
     }
@@ -1096,9 +1100,11 @@ mod dynamic {
             .await
             .err()
             .unwrap();
-        assert!(error
-            .to_string()
-            .contains("service 'missing.Service' not found"));
+        assert!(
+            error
+                .to_string()
+                .contains("service 'missing.Service' not found")
+        );
 
         let invalid_method = dynamic_config(address, "Missing");
         let error = DynamicConsumer::new(&invalid_method, &invalid_method.url)
@@ -1110,9 +1116,11 @@ mod dynamic {
 
         let mut invalid_json = dynamic_config(address, "Unary");
         invalid_json.request = Some(serde_json::json!({"sequence": {"not": "an integer"}}));
-        assert!(DynamicConsumer::new(&invalid_json, &invalid_json.url)
-            .await
-            .is_err());
+        assert!(
+            DynamicConsumer::new(&invalid_json, &invalid_json.url)
+                .await
+                .is_err()
+        );
 
         handle.abort();
     }
@@ -1197,14 +1205,14 @@ mod server {
     use super::super::dynamic::reflected_descriptor_pool;
     use super::super::publisher::GrpcPublisher;
     use super::super::server::*;
-    use super::super::{proto, BridgeMessage};
+    use super::super::{BridgeMessage, proto};
+    use crate::CanonicalMessage;
     use crate::endpoints::grpc::GrpcConsumer;
     use crate::models::GrpcConfig;
     use crate::traits::{MessageConsumer, MessageDisposition, MessagePublisher};
-    use crate::CanonicalMessage;
     use futures::StreamExt;
-    use proto::bridge_server::Bridge;
     use proto::SubscribeRequest;
+    use proto::bridge_server::Bridge;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -1446,10 +1454,12 @@ mod server {
         for id in ["a", "b", "c"] {
             router.dispatch(bridge_msg(id)).await.unwrap();
         }
-        assert!(tokio::time::timeout(Duration::from_secs(1), first.next())
-            .await
-            .expect("lagged stream should terminate")
-            .is_none());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), first.next())
+                .await
+                .expect("lagged stream should terminate")
+                .is_none()
+        );
 
         let mut replay = service.subscribe(request()).await.unwrap().into_inner();
         for id in ["a", "b", "c"] {
@@ -1483,9 +1493,11 @@ mod server {
             subscribers.entry(&format!("c{i}")).retain(&bridge_msg("x"));
         }
         assert!(subscribers.get("c0").is_none(), "the oldest is evicted");
-        assert!(subscribers
-            .get(&format!("c{}", MAX_PENDING_CONSUMERS + 4))
-            .is_some());
+        assert!(
+            subscribers
+                .get(&format!("c{}", MAX_PENDING_CONSUMERS + 4))
+                .is_some()
+        );
     }
 
     /// A concrete free port, so each embedded server gets its own registry entry:
@@ -1525,10 +1537,10 @@ mod server {
     /// be exercised: the Bridge service, reflection v1, and reflection v1alpha.
     #[tokio::test]
     async fn prefix_router_dispatches_bridge_and_both_reflection_versions() {
+        use tonic_reflection::pb::v1alpha::ServerReflectionRequest;
         use tonic_reflection::pb::v1alpha::server_reflection_client::ServerReflectionClient;
         use tonic_reflection::pb::v1alpha::server_reflection_request::MessageRequest;
         use tonic_reflection::pb::v1alpha::server_reflection_response::MessageResponse;
-        use tonic_reflection::pb::v1alpha::ServerReflectionRequest;
 
         let mut consumer = server_consumer_on_free_port(GrpcConfig {
             topic: Some("router".into()),

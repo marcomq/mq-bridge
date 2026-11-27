@@ -7,11 +7,10 @@ use mq_bridge::endpoints::mongodb::{
     MongoDbChangeStreamReader, MongoDbConsumer, MongoDbIdReader, MongoDbPublisher,
 };
 use mq_bridge::test_utils::{
-    add_performance_result, run_chaos_pipeline_test, run_direct_perf_test,
+    PerformanceResult, add_performance_result, run_chaos_pipeline_test, run_direct_perf_test,
     run_performance_pipeline_test, run_performance_pipeline_test_at_least_once_named,
     run_performance_pipeline_test_named, run_pipeline_test, run_test_with_docker,
     run_test_with_docker_controller, setup_logging, should_run, verify_subscriber_logic,
-    PerformanceResult,
 };
 // Queue pipeline: `consume: delete` is explicit because the default (`capture_all`) needs a
 // replica set and otherwise degrades to an `_id`-ordered reader, which cannot tail a collection
@@ -204,10 +203,10 @@ async fn test_mongodb_consumer_no_duplicates() {
     if !should_run("mongodb") {
         return;
     }
+    use mq_bridge::Handled;
     use mq_bridge::models::{Endpoint, Route};
     use mq_bridge::traits::MessagePublisher;
     use mq_bridge::type_handler::TypeHandler;
-    use mq_bridge::Handled;
     use serde::{Deserialize, Serialize};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1003,7 +1002,7 @@ pub async fn test_mongodb_replica_set_performance_direct() {
 
 pub async fn test_mongodb_status() {
     use mq_bridge::traits::{MessageConsumer, MessagePublisher};
-    use tokio::time::{sleep, Duration};
+    use tokio::time::{Duration, sleep};
 
     setup_logging();
     run_test_with_docker_controller(

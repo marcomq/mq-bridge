@@ -29,9 +29,9 @@ use crate::traits::{
     SentBatch,
 };
 use crate::{CanonicalMessage, Route};
-use anyhow::{anyhow, bail, ensure, Result};
-use futures::future::BoxFuture;
+use anyhow::{Result, anyhow, bail, ensure};
 use futures::StreamExt;
+use futures::future::BoxFuture;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::fmt;

@@ -101,9 +101,11 @@ async fn test_grpc_tls_roundtrip() {
     // simple sanity check: send one message and ensure it's received
     let in_channel = in_route.input.channel().unwrap();
     in_channel
-        .fill_messages(vec![mq_bridge::test_utils::generate_test_messages(1)
-            .pop()
-            .unwrap()])
+        .fill_messages(vec![
+            mq_bridge::test_utils::generate_test_messages(1)
+                .pop()
+                .unwrap(),
+        ])
         .await
         .unwrap();
 

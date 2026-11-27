@@ -44,9 +44,9 @@
 //! `u32 BE count`, then `u32 BE len` + payload per part. Payloads only — metadata
 //! and ids have nowhere to go.
 
-use crate::models::PackFormat;
 use crate::CanonicalMessage;
-use anyhow::{anyhow, bail, Result};
+use crate::models::PackFormat;
+use anyhow::{Result, anyhow, bail};
 use bytes::Bytes;
 use std::collections::HashMap;
 
@@ -311,7 +311,9 @@ fn unpack_mqb(payload: &Bytes, limits: &UnpackLimits) -> Result<Vec<CanonicalMes
         bail!("packed batch is shorter than the {HEADER_LEN}-byte envelope header");
     }
     if &payload[..4] != MAGIC {
-        bail!("payload is not an mq-bridge packed batch (bad magic); is `pack` configured on the sending side?");
+        bail!(
+            "payload is not an mq-bridge packed batch (bad magic); is `pack` configured on the sending side?"
+        );
     }
     let version = payload[4];
     if version != VERSION {
@@ -679,12 +681,14 @@ mod tests {
     fn benthos_binary_rejects_a_truncated_blob() {
         let packed = Packer::new(PackFormat::BenthosBinary, true).pack(&[message("hello", &[])]);
         for cut in 0..packed.len() {
-            assert!(unpack(
-                PackFormat::BenthosBinary,
-                &packed.slice(..cut),
-                &UnpackLimits::default()
-            )
-            .is_err());
+            assert!(
+                unpack(
+                    PackFormat::BenthosBinary,
+                    &packed.slice(..cut),
+                    &UnpackLimits::default()
+                )
+                .is_err()
+            );
         }
     }
 }

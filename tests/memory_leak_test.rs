@@ -20,8 +20,8 @@
 
 use std::time::{Duration, Instant};
 
-use mq_bridge::models::{Endpoint, EndpointType, StaticConfig};
 use mq_bridge::Route;
+use mq_bridge::models::{Endpoint, EndpointType, StaticConfig};
 
 /// Current resident set size of this process, in bytes.
 ///

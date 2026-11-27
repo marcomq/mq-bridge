@@ -3,8 +3,9 @@
 
 use mq_bridge::endpoints::sqlx::{SqlxConsumer, SqlxPublisher};
 use mq_bridge::test_utils::{
-    add_performance_result, run_direct_perf_test, run_performance_pipeline_test_named,
-    run_test_with_docker, run_test_with_docker_controller, setup_logging, PERF_TEST_MESSAGE_COUNT,
+    PERF_TEST_MESSAGE_COUNT, add_performance_result, run_direct_perf_test,
+    run_performance_pipeline_test_named, run_test_with_docker, run_test_with_docker_controller,
+    setup_logging,
 };
 use std::sync::Arc;
 
@@ -108,8 +109,8 @@ pub async fn test_postgres_performance_direct() {
 }
 
 pub async fn test_postgres_multicolumn() {
-    use mq_bridge::traits::MessagePublisher;
     use mq_bridge::CanonicalMessage;
+    use mq_bridge::traits::MessagePublisher;
     use sqlx::{AnyPool, Row};
 
     setup_logging();
@@ -183,9 +184,9 @@ pub async fn test_postgres_multicolumn() {
 
 /// A row the table rejects fails alone, whichever way the batch is written.
 pub async fn test_postgres_rejected_row_fails_alone() {
+    use mq_bridge::CanonicalMessage;
     use mq_bridge::outcomes::SentBatch;
     use mq_bridge::traits::MessagePublisher;
-    use mq_bridge::CanonicalMessage;
     use sqlx::AnyPool;
 
     setup_logging();
@@ -266,8 +267,8 @@ pub async fn test_postgres_rejected_row_fails_alone() {
 
 /// `columns: auto` sends one statement text with bind types that change from record to record.
 pub async fn test_postgres_auto_columns_changing_bind_types() {
-    use mq_bridge::traits::MessagePublisher;
     use mq_bridge::CanonicalMessage;
+    use mq_bridge::traits::MessagePublisher;
     use sqlx::AnyPool;
 
     setup_logging();
@@ -415,7 +416,7 @@ pub async fn test_postgres_cursor_timestamptz_to_json() {
 
 pub async fn test_postgres_status() {
     use mq_bridge::traits::{MessageConsumer, MessagePublisher};
-    use tokio::time::{sleep, Duration};
+    use tokio::time::{Duration, sleep};
 
     setup_logging();
     run_test_with_docker_controller(DOCKER_COMPOSE_FILE, |controller| async move {

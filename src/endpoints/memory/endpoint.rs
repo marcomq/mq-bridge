@@ -4,18 +4,18 @@
 //  git clone https://github.com/marcomq/mq-bridge
 use super::memory_transport::MemoryTransport;
 use super::transport::{TransportChannel, TransportUrl};
+use crate::CanonicalMessage;
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::event_store::{
-    event_store_exists, get_or_create_event_store, EventStore, EventStoreConsumer,
+    EventStore, EventStoreConsumer, event_store_exists, get_or_create_event_store,
 };
 use crate::models::MemoryConfig;
 use crate::traits::{
     BatchCommitFunc, BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
     MessagePublisher, PublisherError, Received, ReceivedBatch, Sent, SentBatch,
 };
-use crate::CanonicalMessage;
 use anyhow::anyhow;
-use async_channel::{bounded, Receiver, Sender};
+use async_channel::{Receiver, Sender, bounded};
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use std::any::Any;
@@ -361,7 +361,10 @@ impl MemoryPublisher {
 
         let backend = if config.subscribe_mode {
             if channel_exists {
-                return Err(anyhow!("Topic '{}' is already active as a Queue (MemoryChannel), but Subscriber mode (EventStore) was requested.", config.topic));
+                return Err(anyhow!(
+                    "Topic '{}' is already active as a Queue (MemoryChannel), but Subscriber mode (EventStore) was requested.",
+                    config.topic
+                ));
             }
             let store = get_or_create_event_store(&config.topic);
             PublisherBackend::Log(store)
@@ -566,15 +569,13 @@ impl MessagePublisher for MemoryPublisher {
                     match tokio::time::timeout_at(deadline, sender.send(vec![message])).await {
                         Ok(Ok(())) => {}
                         Ok(Err(e)) => {
-                            return Err(anyhow!("Failed to send to memory channel: {}", e).into())
+                            return Err(anyhow!("Failed to send to memory channel: {}", e).into());
                         }
-                        Err(_) => {
-                            return Err(anyhow!(
+                        Err(_) => return Err(anyhow!(
                             "Failed to send to memory channel: no room in the queue within {:?}",
                             self.request_timeout
                         )
-                            .into())
-                        }
+                        .into()),
                     }
 
                     let received = tokio::time::timeout_at(deadline, rx).await;
@@ -743,7 +744,10 @@ impl MemoryConsumer {
 
         if config.subscribe_mode {
             if channel_exists {
-                return Err(anyhow!("Topic '{}' is already active as a Queue (MemoryChannel), but Subscriber mode (EventStore) was requested.", config.topic));
+                return Err(anyhow!(
+                    "Topic '{}' is already active as a Queue (MemoryChannel), but Subscriber mode (EventStore) was requested.",
+                    config.topic
+                ));
             }
             let store = get_or_create_event_store(&config.topic);
             // For subscriber mode, we generate a unique ID if one isn't implicit in the usage.
@@ -762,7 +766,10 @@ impl MemoryConsumer {
                 // The EventStore implementation currently supports Pub/Sub (broadcast) only.
                 // Adapting would result in this consumer receiving all messages, violating
                 // the expected Queue (competing consumer) semantics requested by `subscribe_mode: false`.
-                return Err(anyhow!("Topic '{}' is already active as a Subscriber Log (EventStore), but Queue mode (MemoryChannel) was requested.", config.topic));
+                return Err(anyhow!(
+                    "Topic '{}' is already active as a Subscriber Log (EventStore), but Queue mode (MemoryChannel) was requested.",
+                    config.topic
+                ));
             }
             let queue = MemoryQueueConsumer::new(&config)?;
             Ok(Self::Queue(queue))
@@ -1274,12 +1281,12 @@ fn reply_result(
     let mut response = match received {
         Ok(Ok(response)) => response,
         Ok(Err(e)) => {
-            return Err(anyhow!("Failed to receive response for correlation_id {cid}: {e}").into())
+            return Err(anyhow!("Failed to receive response for correlation_id {cid}: {e}").into());
         }
         Err(_) => {
             return Err(PublisherError::Retryable(anyhow!(
                 "Request timed out waiting for response for correlation_id {cid}"
-            )))
+            )));
         }
     };
     if let Some(outcome) = response.get_metadata(REQUEST_OUTCOME) {
@@ -1462,7 +1469,7 @@ mod tests {
     use super::*;
     use crate::models::{Endpoint, Route};
     use crate::traits::Handled;
-    use crate::{msg, CanonicalMessage};
+    use crate::{CanonicalMessage, msg};
     use serde_json::json;
     use tokio::time::sleep;
 
@@ -1825,9 +1832,10 @@ mod tests {
         message.set_metadata("correlation_id", correlation_id.clone());
 
         let err = publisher.send(message).await.unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("Request timed out waiting for response"));
+        assert!(
+            err.to_string()
+                .contains("Request timed out waiting for response")
+        );
 
         let response_channel = get_or_create_response_channel(&topic);
         assert!(
@@ -2041,9 +2049,10 @@ mod tests {
         let err = (batch.commit)(vec![MessageDisposition::Ack])
             .await
             .unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("Memory batch commit received mismatched disposition count"));
+        assert!(
+            err.to_string()
+                .contains("Memory batch commit received mismatched disposition count")
+        );
 
         let retried =
             tokio::time::timeout(std::time::Duration::from_secs(1), consumer.receive_batch(2))
@@ -2227,10 +2236,11 @@ mod tests {
         };
         let err = MemoryConsumer::new(&log_conf);
         assert!(err.is_err());
-        assert!(err
-            .unwrap_err()
-            .to_string()
-            .contains("already active as a Queue"));
+        assert!(
+            err.unwrap_err()
+                .to_string()
+                .contains("already active as a Queue")
+        );
 
         // Case 2: Active Log, try to create Queue Consumer
         let log_pub_conf = MemoryConfig {
@@ -2247,10 +2257,11 @@ mod tests {
         };
         let err = MemoryConsumer::new(&queue_conf);
         assert!(err.is_err());
-        assert!(err
-            .unwrap_err()
-            .to_string()
-            .contains("already active as a Subscriber Log"));
+        assert!(
+            err.unwrap_err()
+                .to_string()
+                .contains("already active as a Subscriber Log")
+        );
     }
 
     #[tokio::test]
@@ -2268,10 +2279,11 @@ mod tests {
         };
         let err = MemoryPublisher::new(&log_conf);
         assert!(err.is_err());
-        assert!(err
-            .unwrap_err()
-            .to_string()
-            .contains("already active as a Queue"));
+        assert!(
+            err.unwrap_err()
+                .to_string()
+                .contains("already active as a Queue")
+        );
     }
 
     #[tokio::test]

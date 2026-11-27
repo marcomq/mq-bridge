@@ -1,13 +1,13 @@
+use crate::CanonicalMessage;
 use crate::models::{FaultMode, RandomPanicMiddleware};
 use crate::traits::{
     BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError, Received,
     ReceivedBatch, Sent, SentBatch,
 };
-use crate::CanonicalMessage;
 use async_trait::async_trait;
 use std::any::Any;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 /// Counts the message; true on every message, or only on the `trigger_on_message`th.
 fn should_trigger_fault(config: &RandomPanicMiddleware) -> bool {

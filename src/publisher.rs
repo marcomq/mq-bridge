@@ -1,9 +1,9 @@
-use crate::endpoints;
-use crate::models;
-use crate::traits;
 use crate::CanonicalMessage;
 use crate::Sent;
 use crate::SentBatch;
+use crate::endpoints;
+use crate::models;
+use crate::traits;
 use std::collections::HashMap;
 use std::sync::{OnceLock, PoisonError, RwLock};
 
@@ -44,7 +44,9 @@ impl Publisher {
     pub async fn request(&self, message: CanonicalMessage) -> anyhow::Result<CanonicalMessage> {
         match self.publisher.send(message).await? {
             Sent::Response(resp) => Ok(resp),
-            Sent::Ack => Err(anyhow::anyhow!("Expected a response from the endpoint, but received only an acknowledgment (Ack). Ensure the endpoint and route are correctly configured for request-reply.")),
+            Sent::Ack => Err(anyhow::anyhow!(
+                "Expected a response from the endpoint, but received only an acknowledgment (Ack). Ensure the endpoint and route are correctly configured for request-reply."
+            )),
         }
     }
 
@@ -59,14 +61,21 @@ impl Publisher {
             return Ok(Vec::new());
         }
         match self.publisher.send_batch(messages).await? {
-            SentBatch::Partial { responses: Some(resps), failed } if failed.is_empty() && resps.len() == count => Ok(resps),
-            SentBatch::Ack => Err(anyhow::anyhow!("Expected responses from the endpoint, but received only acknowledgments (Ack). Ensure the endpoint and route are correctly configured for request-reply.")),
+            SentBatch::Partial {
+                responses: Some(resps),
+                failed,
+            } if failed.is_empty() && resps.len() == count => Ok(resps),
+            SentBatch::Ack => Err(anyhow::anyhow!(
+                "Expected responses from the endpoint, but received only acknowledgments (Ack). Ensure the endpoint and route are correctly configured for request-reply."
+            )),
             SentBatch::Partial { failed, .. } if !failed.is_empty() => Err(anyhow::anyhow!(
                 "Request batch failed for {} of {count} messages; first error: {}",
                 failed.len(),
                 failed[0].1
             )),
-            _ => Err(anyhow::anyhow!("Request batch failed to return the expected responses. Ensure the endpoint and route are correctly configured for request-reply.")),
+            _ => Err(anyhow::anyhow!(
+                "Request batch failed to return the expected responses. Ensure the endpoint and route are correctly configured for request-reply."
+            )),
         }
     }
 
@@ -181,8 +190,8 @@ pub use crate::middleware::apply_middlewares_to_publisher as apply_middlewares;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{Endpoint, PublisherConfig};
     use crate::CanonicalMessage;
+    use crate::models::{Endpoint, PublisherConfig};
     use std::collections::HashMap;
     use std::sync::Arc;
 

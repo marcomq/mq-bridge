@@ -551,7 +551,7 @@ impl SqlxPublisher {
                     .await
                 {
                     Err(e) if pg_function_missing(&e, name) => {
-                        return Err(PgBatchError::Unsupported(anyhow!(e)))
+                        return Err(PgBatchError::Unsupported(anyhow!(e)));
                     }
                     rows => rows,
                 }

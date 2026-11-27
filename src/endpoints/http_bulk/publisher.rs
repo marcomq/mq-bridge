@@ -6,22 +6,22 @@
 //! Output for HTTP APIs that take many JSON documents in one request.
 
 use super::query::Query;
-use super::{quoted, Connection, JSON};
+use super::{Connection, JSON, quoted};
+use crate::CanonicalMessage;
 use crate::models::{
     Compression, HttpBulkConfig, HttpBulkDelete, HttpBulkFormat, HttpBulkItems, HttpBulkJob,
     HttpBulkLines, HttpBulkResult, HttpBulkUpsert,
 };
 use crate::support::change_op::ChangeOp;
 use crate::support::compression_pool::{gzip_default, lz4_pooled, zstd_pooled};
-use crate::support::interpolation::{pick_fields, CompiledTemplate};
-use crate::support::poll_job::{poll_until, PollSchedule};
+use crate::support::interpolation::{CompiledTemplate, pick_fields};
+use crate::support::poll_job::{PollSchedule, poll_until};
 use crate::support::{http_status, ndjson};
 use crate::traits::{MessagePublisher, PublisherError, SentBatch};
-use crate::CanonicalMessage;
-use anyhow::{anyhow, bail, Context};
+use anyhow::{Context, anyhow, bail};
 use async_trait::async_trait;
-use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
-use reqwest::header::{HeaderValue, CONTENT_ENCODING, CONTENT_TYPE};
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+use reqwest::header::{CONTENT_ENCODING, CONTENT_TYPE, HeaderValue};
 use serde_json::Value;
 use std::ops::Range;
 use std::sync::{Mutex, PoisonError};
@@ -203,7 +203,9 @@ impl HttpBulkPublisher {
         let connection = Connection::new(config)?;
         let query = config.query.as_ref().map(Query::new).transpose()?;
         if config.query.as_ref().is_some_and(|q| q.stream_to.is_some()) {
-            bail!("http_bulk query.stream_to is built by the endpoint factory, not HttpBulkPublisher::new");
+            bail!(
+                "http_bulk query.stream_to is built by the endpoint factory, not HttpBulkPublisher::new"
+            );
         }
         if query.is_some()
             && (config.upsert.is_some() || config.delete.is_some() || config.operation.is_some())
@@ -246,7 +248,9 @@ impl HttpBulkPublisher {
                 } else {
                     let whole = compile(document)?;
                     if !whole.reads_message() {
-                        bail!("http_bulk upsert.document needs {DOCUMENT} or a token from the message, e.g. ${{message:payload}}");
+                        bail!(
+                            "http_bulk upsert.document needs {DOCUMENT} or a token from the message, e.g. ${{message:payload}}"
+                        );
                     }
                     (document.clone(), Document::Whole(whole))
                 };
@@ -612,7 +616,7 @@ impl HttpBulkPublisher {
                 Err(error) => {
                     return Err(Failure::permanent(format!(
                         "{label} body could not be compressed: {error}"
-                    )))
+                    )));
                 }
             };
         }
@@ -706,7 +710,7 @@ impl HttpBulkPublisher {
                     Err(error) => {
                         return Some(Err(Failure::permanent(format!(
                             "polling job {id} failed: {error}"
-                        ))))
+                        ))));
                     }
                 };
                 let status = response.status();
@@ -888,7 +892,7 @@ fn rejected_items(
                     return Err(Failure::permanent(format!(
                         "{label} answered an entry without a document index below {documents} at '{pointer}': {}",
                         quoted(text)
-                    )))
+                    )));
                 }
             },
         };
@@ -1025,8 +1029,8 @@ mod tests {
     use super::*;
     use crate::plugin::test_support::{StubHttpServer, StubRequest};
     use serde_json::json;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     async fn server(
         respond: impl Fn(&StubRequest) -> (u16, String) + Send + Sync + 'static,
@@ -1368,9 +1372,11 @@ mod tests {
 
         let failed = failures(sent);
         assert_eq!(failed.len(), 2);
-        assert!(failed
-            .iter()
-            .all(|f| !f.1 && f.2.contains("no primary key")));
+        assert!(
+            failed
+                .iter()
+                .all(|f| !f.1 && f.2.contains("no primary key"))
+        );
     }
 
     #[tokio::test]
@@ -1790,12 +1796,16 @@ mod tests {
             "auth": issuer, "upsert": {"path": "/d"}}))
             .contains("token_url")
         );
-        assert!(refused(json!({"url": "http://h", "upsert": {"path": "/d",
+        assert!(
+            refused(json!({"url": "http://h", "upsert": {"path": "/d",
             "result": {"job": job.clone()}}}))
-        .contains("{id}"));
-        assert!(refused(json!({"url": "http://h", "upsert": {"path": "/d",
+            .contains("{id}")
+        );
+        assert!(
+            refused(json!({"url": "http://h", "upsert": {"path": "/d",
             "result": {"lines": lines, "job": job}}}))
-        .contains("more than one"));
+            .contains("more than one")
+        );
         for (upsert, expected) in [
             (
                 json!({"path": "/d", "action": "{}", "format": "json_array"}),

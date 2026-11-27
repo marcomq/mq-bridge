@@ -19,14 +19,14 @@ mod pgoutput;
 pub(crate) mod replication;
 mod state;
 
-use crate::canonical_message::{hashed_id, CanonicalMessage, IdHash};
+use crate::ReceivedBatch;
+use crate::canonical_message::{CanonicalMessage, IdHash, hashed_id};
 use crate::checkpoint::{
-    checkpoint_key, CheckpointStore, FileCheckpointStore, VersionedCheckpoint,
+    CheckpointStore, FileCheckpointStore, VersionedCheckpoint, checkpoint_key,
 };
 use crate::errors::ConsumerError;
 use crate::models::PostgresCdcConfig;
 use crate::traits::{BatchCommitFunc, MessageConsumer, MessageDisposition};
-use crate::ReceivedBatch;
 use anyhow::anyhow;
 use async_trait::async_trait;
 use futures::FutureExt;
@@ -34,8 +34,8 @@ use pgwire_replication::{Lsn, ReplicationClient};
 use replication::ReplicationEvent;
 use std::any::Any;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tracing::{debug, info, warn};
 
 use pgoutput::decoder::decode_message;
@@ -463,11 +463,7 @@ impl NackLatch {
 /// The LSN an ack of row `ordinal` confirms. Rows of a transaction share its `end_lsn`,
 /// so only the last one may confirm it; a batch can end in the middle of a transaction.
 fn confirm_lsn(ordinal: usize, rows: usize, end_lsn: u64) -> u64 {
-    if ordinal + 1 == rows {
-        end_lsn
-    } else {
-        0
-    }
+    if ordinal + 1 == rows { end_lsn } else { 0 }
 }
 
 /// The LSN a batch's dispositions confirm, and whether a row was nacked. Nothing after

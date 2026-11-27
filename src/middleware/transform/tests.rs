@@ -3,20 +3,20 @@
 //  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
+use super::TRANSFORM_ERROR_KEY;
 use super::compiled::Compiled;
 use super::error::{ErrorKind, TransformError};
 use super::path::{CompiledPath, Seg};
-use super::TRANSFORM_ERROR_KEY;
 use super::{TransformConsumer, TransformPublisher};
+use crate::CanonicalMessage;
 use crate::endpoints::memory::{MemoryConsumer, MemoryPublisher};
 use crate::models::TransformMiddleware;
 use crate::traits::{
     ConsumerError, MessageConsumer, MessageDisposition, MessagePublisher, PublisherError, Received,
     ReceivedBatch, SentBatch,
 };
-use crate::CanonicalMessage;
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::any::Any;
 use std::sync::{Arc, Mutex};
 
@@ -1100,10 +1100,10 @@ fn test_coerce_empty_as_null_leaves_fields_the_schema_does_not_mention() {
 }
 
 mod fast_path_equivalence {
-    use super::super::compiled::{map_sorts_keys, Compiled};
-    use crate::models::{DetailedMappingRule, MappingRule, TransformMiddleware};
+    use super::super::compiled::{Compiled, map_sorts_keys};
     use crate::CanonicalMessage;
-    use serde_json::{json, Map, Value};
+    use crate::models::{DetailedMappingRule, MappingRule, TransformMiddleware};
+    use serde_json::{Map, Value, json};
 
     /// What the three runs of a payload produced.
     struct Outcomes {
@@ -1703,7 +1703,7 @@ mod fast_path_equivalence {
             assert_eq!(out.fast, out.slow, "key {key:?}");
         }
 
-        use super::super::coerce::{render_path, Crumb};
+        use super::super::coerce::{Crumb, render_path};
         assert_eq!(
             render_path(&[
                 Crumb::Key("o"),

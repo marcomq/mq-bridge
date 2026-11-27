@@ -3,9 +3,9 @@
 //  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
+use crate::CanonicalMessage;
 use crate::errors::PublisherError;
 use crate::traits::{Handler, HandlerError, MessagePublisher};
-use crate::CanonicalMessage;
 use async_trait::async_trait;
 use std::any::Any;
 use std::sync::Arc;

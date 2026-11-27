@@ -4,6 +4,7 @@
 //  git clone https://github.com/marcomq/mq-bridge
 
 use super::poll::PollBackoff;
+use crate::CanonicalMessage;
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::{CaRoots, SqlxConfig};
 use crate::support::cursor_batch::{CursorPosition, Unsettled};
@@ -13,8 +14,7 @@ use crate::traits::{
     BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
     MessagePublisher, PublisherError, ReceivedBatch, Sent, SentBatch,
 };
-use crate::CanonicalMessage;
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use async_trait::async_trait;
 use sqlx::any::AnyPoolOptions;
 #[cfg(feature = "sqlx")]
@@ -51,11 +51,11 @@ mod lookup;
 use lookup::*;
 mod template;
 pub use cursor::SqlxCursorReader;
-pub(crate) use cursor::{build_sql_checkpoint_store, cursor_checkpoint};
 use cursor::{
-    ensure_transactional_engine, is_permanent_decode_error, quote_ident_for, JsonRowSchema,
-    MYSQL_COLUMN_TYPES_SQL, SQLITE_COLUMN_TYPES_SQL,
+    JsonRowSchema, MYSQL_COLUMN_TYPES_SQL, SQLITE_COLUMN_TYPES_SQL, ensure_transactional_engine,
+    is_permanent_decode_error, quote_ident_for,
 };
+pub(crate) use cursor::{build_sql_checkpoint_store, cursor_checkpoint};
 #[cfg(feature = "dedup")]
 pub(crate) use dedup::build_sql_dedup_store;
 use template::*;
@@ -146,7 +146,9 @@ fn build_sqlx_url_with_tls(config: &SqlxConfig) -> anyhow::Result<String> {
                 // MySQL/MariaDB support for TLS options in URL is more limited.
                 // It's generally better to use a client-side configuration file (`my.cnf`)
                 // for complex TLS setups. We'll add what we can.
-                warn!("For complex MySQL/MariaDB TLS setups, using a client configuration file (my.cnf) is recommended over URL parameters.");
+                warn!(
+                    "For complex MySQL/MariaDB TLS setups, using a client configuration file (my.cnf) is recommended over URL parameters."
+                );
                 // The driver takes the last `ssl-mode`: a URL mode that enforces TLS is left
                 // to win, a weaker one is overridden by the mode `tls` requires.
                 let url_sets_mode = url_enforces_tls(&url);
@@ -1094,7 +1096,9 @@ impl SqlxPublisher {
         let values_pos = match find_top_level_values(&self.insert_query) {
             Some(pos) => pos,
             None => {
-                warn!("Could not optimize batch insert due to custom query format. Falling back to iterative inserts.");
+                warn!(
+                    "Could not optimize batch insert due to custom query format. Falling back to iterative inserts."
+                );
                 return self.send_batch_iterative(messages, held).await;
             }
         };
@@ -1135,7 +1139,9 @@ impl SqlxPublisher {
         // would keep a stale index and the bind count would not line up. Single-row `send()`
         // handles these correctly.
         if binds_after_values(values_suffix) {
-            warn!("insert_query binds a value after the VALUES tuple. Falling back to iterative inserts.");
+            warn!(
+                "insert_query binds a value after the VALUES tuple. Falling back to iterative inserts."
+            );
             return self.send_batch_iterative(messages, held).await;
         }
         // A further tuple is part of every single-row insert; the rebuild would write it once.
@@ -1150,7 +1156,9 @@ impl SqlxPublisher {
         // The `(payload)` single-column guard only applies to legacy mode; a
         // token-based query is already known-correct from `parse_insert_template`.
         if self.column_sources.is_empty() && !contains_payload_clause(base_query) {
-            warn!("Could not optimize batch insert due to custom query format. Falling back to iterative inserts.");
+            warn!(
+                "Could not optimize batch insert due to custom query format. Falling back to iterative inserts."
+            );
             return self.send_batch_iterative(messages, held).await;
         }
 
@@ -1158,7 +1166,9 @@ impl SqlxPublisher {
         let per_row = self.column_sources.len().max(1);
         // The tuple is repeated per row with its expressions (`CAST(…)`, `decode(…)`) kept.
         let Some(template) = tuple_template(values_tuple, &self.driver_name, per_row) else {
-            warn!("insert_query's VALUES tuple cannot be repeated per row. Falling back to iterative inserts.");
+            warn!(
+                "insert_query's VALUES tuple cannot be repeated per row. Falling back to iterative inserts."
+            );
             return self.send_batch_iterative(messages, held).await;
         };
         let per_statement = (columns::MAX_BINDS / per_row).max(1);
@@ -1345,18 +1355,25 @@ impl SqlxConsumer {
             match driver_name.as_str() {
                 "PostgreSQL" => {
                     if !query.contains("$1") {
-                        return Err(anyhow!("Custom select_query for PostgreSQL must contain a '$1' placeholder for the batch size limit."));
+                        return Err(anyhow!(
+                            "Custom select_query for PostgreSQL must contain a '$1' placeholder for the batch size limit."
+                        ));
                     }
                     query.clone()
                 }
                 "Microsoft SQL Server" => {
                     if !query.contains("@p1") {
-                        return Err(anyhow!("Custom select_query for SQL Server must contain a '@p1' placeholder for the batch size limit."));
+                        return Err(anyhow!(
+                            "Custom select_query for SQL Server must contain a '@p1' placeholder for the batch size limit."
+                        ));
                     }
                     query.clone()
                 }
                 _ => {
-                    return Err(anyhow!("Custom select_query is not supported for the '{}' driver. It is only supported for PostgreSQL and Microsoft SQL Server.", driver_name));
+                    return Err(anyhow!(
+                        "Custom select_query is not supported for the '{}' driver. It is only supported for PostgreSQL and Microsoft SQL Server.",
+                        driver_name
+                    ));
                 }
             }
         } else {
@@ -1603,7 +1620,10 @@ impl MessageConsumer for SqlxConsumer {
             "SQLite" => self.fetch_and_lock_sqlite(max_messages).await?,
             _ => {
                 // Fallback for unknown drivers with a simple, non-locking read.
-                warn!("SQLx consumer for driver '{}' is using a non-locking read strategy. This is not safe for concurrent consumers.", self.driver_name);
+                warn!(
+                    "SQLx consumer for driver '{}' is using a non-locking read strategy. This is not safe for concurrent consumers.",
+                    self.driver_name
+                );
                 let final_query = format!("{} LIMIT ?", self.select_query);
                 sqlx::query(audited_sql(&final_query))
                     .bind(max_messages as i64)
@@ -1659,7 +1679,9 @@ impl MessageConsumer for SqlxConsumer {
                     let should_ack = match disp {
                         MessageDisposition::Ack => true,
                         MessageDisposition::Reply(_) => {
-                            tracing::warn!("SQLx consumer received a Reply/StreamReply, but replying is not supported by this endpoint. The reply payload is dropped, and the original message is acknowledged.");
+                            tracing::warn!(
+                                "SQLx consumer received a Reply/StreamReply, but replying is not supported by this endpoint. The reply payload is dropped, and the original message is acknowledged."
+                            );
                             true
                         }
                         MessageDisposition::Nack => false,

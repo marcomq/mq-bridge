@@ -13,8 +13,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use mq_bridge::errors::ProcessingError;
 use mq_bridge::middleware::{
-    apply_middlewares_to_consumer, apply_middlewares_to_publisher, runs_as_map, Filters,
-    MessageView,
+    Filters, MessageView, apply_middlewares_to_consumer, apply_middlewares_to_publisher,
+    runs_as_map,
 };
 use mq_bridge::models::Endpoint;
 use mq_bridge::plugin::sdk::{BatchFilter, MessageRef, MiddlewareFactory, Verdict};

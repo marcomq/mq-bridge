@@ -2,9 +2,9 @@
 
 use mq_bridge::endpoints::mqtt::{MqttConsumer, MqttPublisher};
 use mq_bridge::test_utils::{
-    add_performance_result, run_direct_perf_test, run_performance_pipeline_test,
-    run_test_with_docker, run_test_with_docker_controller, setup_logging, verify_subscriber_logic,
-    PERF_TEST_BATCH_MESSAGE_COUNT,
+    PERF_TEST_BATCH_MESSAGE_COUNT, add_performance_result, run_direct_perf_test,
+    run_performance_pipeline_test, run_test_with_docker, run_test_with_docker_controller,
+    setup_logging, verify_subscriber_logic,
 };
 use std::sync::Arc;
 const CONFIG_YAML: &str = r#"
@@ -119,7 +119,7 @@ pub async fn test_mqtt_performance_direct() {
 
 pub async fn test_mqtt_status() {
     use mq_bridge::traits::{MessageConsumer, MessagePublisher};
-    use tokio::time::{sleep, Duration};
+    use tokio::time::{Duration, sleep};
 
     setup_logging();
     run_test_with_docker_controller(

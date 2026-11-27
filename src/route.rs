@@ -68,11 +68,11 @@ use crate::errors::ProcessingError;
 pub use crate::models::Route;
 use crate::models::{DeliveryGuarantee, Endpoint, EndpointType, Middleware, NameBy, RouteOptions};
 use crate::traits::{
-    with_disconnect_outcome, BatchCommitFunc, ConsumerError, DisconnectOutcome, EndpointStatus,
-    Handler, HandlerError, MessageConsumer, MessageDisposition, MessagePublisher, PublisherError,
-    SentBatch,
+    BatchCommitFunc, ConsumerError, DisconnectOutcome, EndpointStatus, Handler, HandlerError,
+    MessageConsumer, MessageDisposition, MessagePublisher, PublisherError, SentBatch,
+    with_disconnect_outcome,
 };
-use async_channel::{bounded, Sender};
+use async_channel::{Sender, bounded};
 use serde::de::DeserializeOwned;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -120,7 +120,7 @@ pub use registry::{
 };
 #[cfg(test)]
 pub(crate) use replay::source_is_at_most_once;
-pub(crate) use send::{RunPositions, RUN_POSITIONS};
+pub(crate) use send::{RUN_POSITIONS, RunPositions};
 
 // Re-export extensions for backward compatibility and internal usage
 pub use crate::extensions::{

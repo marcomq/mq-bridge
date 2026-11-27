@@ -595,8 +595,8 @@ impl Drop for StreamReply {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::traits::{MessagePublisher, PublisherError};
     use crate::SentBatch;
+    use crate::traits::{MessagePublisher, PublisherError};
     use anyhow::anyhow;
     use async_trait::async_trait;
 

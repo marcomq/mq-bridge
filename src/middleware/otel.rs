@@ -10,11 +10,11 @@
 //! so configuring it costs nothing. `traceparent`/`tracestate` are read and written here
 //! directly, so no global propagator is needed.
 
+use crate::CanonicalMessage;
 use crate::traits::{
     BatchCommitFunc, BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
     MessagePublisher, PublisherError, ReceivedBatch, Sent, SentBatch,
 };
-use crate::CanonicalMessage;
 use async_trait::async_trait;
 use opentelemetry::global::{self, BoxedTracer};
 use opentelemetry::trace::{

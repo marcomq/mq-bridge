@@ -5,8 +5,8 @@
 
 //! CSV encoding and decoding of records, shared by the file and object-store endpoints.
 
-use crate::codec::{CsvDialect, CsvSyntax};
 use crate::CanonicalMessage;
+use crate::codec::{CsvDialect, CsvSyntax};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::warn;
@@ -983,7 +983,9 @@ fn dedup_column_names(names: &mut [Vec<u8>]) {
     }
     static WARNED: AtomicBool = AtomicBool::new(false);
     if !WARNED.swap(true, Ordering::Relaxed) {
-        warn!("CSV header repeats column names; repeats are renamed with a _2, _3, … suffix. Logged once per process.");
+        warn!(
+            "CSV header repeats column names; repeats are renamed with a _2, _3, … suffix. Logged once per process."
+        );
     }
 }
 

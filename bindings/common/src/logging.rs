@@ -127,8 +127,8 @@ pub fn env_filter(default_level: Option<&str>) -> EnvFilter {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
-    use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::Layer;
+    use tracing_subscriber::layer::SubscriberExt;
 
     /// A layer that records every flattened event, so tests can assert on what
     /// `record_from_event` produces through the real `tracing` macro path.
@@ -224,11 +224,13 @@ mod tests {
         // Explicit level parses; a bogus level degrades to the default rather
         // than panicking. (Env-var precedence is covered by the binding tests,
         // which control the process environment.)
-        assert!(std::panic::catch_unwind(|| {
-            let _ = env_filter(Some("info"));
-            let _ = env_filter(Some("not a level"));
-            let _ = env_filter(None);
-        })
-        .is_ok());
+        assert!(
+            std::panic::catch_unwind(|| {
+                let _ = env_filter(Some("info"));
+                let _ = env_filter(Some("not a level"));
+                let _ = env_filter(None);
+            })
+            .is_ok()
+        );
     }
 }

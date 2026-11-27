@@ -5,11 +5,11 @@
 //! environment, so each test sets the LocalStack S3 vars before building endpoints.
 
 use super::assert_permanent_consumer_error;
+use mq_bridge::CanonicalMessage;
 use mq_bridge::endpoints::object_store::{ObjectStoreConsumer, ObjectStorePublisher};
 use mq_bridge::models::{FileFormat, ObjectStoreConfig};
 use mq_bridge::test_utils::{run_pipeline_test, run_test_with_docker, setup_logging};
 use mq_bridge::traits::{MessageConsumer, MessagePublisher};
-use mq_bridge::CanonicalMessage;
 
 pub(super) const BUCKET: &str = "mqb-object-store-test";
 pub(super) const ENDPOINT: &str = "http://localhost:4566";
@@ -215,8 +215,8 @@ pub async fn test_object_store_checkpoint_round_trip() {
 /// * a `checkpoint_store` overlapping the source prefix — a config error, so rebuilding the
 ///   consumer reproduces it exactly.
 pub async fn test_object_store_permanent_errors_fail_fast() {
-    use mq_bridge::models::{Endpoint, EndpointType};
     use mq_bridge::Route;
+    use mq_bridge::models::{Endpoint, EndpointType};
 
     setup_logging();
     run_test_with_docker(

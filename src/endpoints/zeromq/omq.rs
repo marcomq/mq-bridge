@@ -11,12 +11,12 @@
 //! its exchanges by hand, because ZMTP requires strict send/recv alternation.
 
 use super::codec;
+use crate::CanonicalMessage;
 use crate::models::{ZeroMqConfig, ZeroMqFormat, ZeroMqSocketType};
 use crate::traits::{
     BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
     MessagePublisher, PublisherError, ReceivedBatch, SentBatch,
 };
-use crate::CanonicalMessage;
 use anyhow::anyhow;
 use async_trait::async_trait;
 use omq_tokio::{Endpoint, Message, Options, Socket, SocketType};
@@ -140,7 +140,7 @@ impl ZeroMqOmqPublisher {
                         return Err(anyhow!(
                             "socket type {other:?} is not supported by a publisher \
                              (use Push, Pub or Req)"
-                        ))
+                        ));
                     }
                 };
                 let socket = Socket::new(omq_type, Options::default());
@@ -348,7 +348,7 @@ impl ZeroMqOmqConsumer {
                 return Err(anyhow!(
                     "socket type {other:?} is not supported by a consumer \
                      (use Pull, Sub or Rep)"
-                ))
+                ));
             }
         };
 
