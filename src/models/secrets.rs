@@ -126,6 +126,10 @@ impl Endpoint {
                 cfg.to.check_secret_keys()?;
                 cfg.forward_to.check_secret_keys()
             }
+            EndpointType::LlmAgent(cfg) => cfg
+                .tools
+                .iter()
+                .try_for_each(|tool| tool.endpoint.check_secret_keys()),
             _ => Ok(()),
         }
     }
@@ -664,27 +668,36 @@ connection_secrets! {
     PostgresCdcConfig { checkpoint_store }
 }
 
+/// The secrets of an untyped `auth`, at the paths of `HttpBulkConfig`.
+fn take_auth_secrets(
+    auth: &mut Option<serde_json::Value>,
+    prefix: &str,
+    secrets: &mut HashMap<String, String>,
+) {
+    for (kind, field) in [
+        ("oauth2", "client_secret"),
+        ("login", "body"),
+        ("aws_sigv4", "secret_key"),
+        ("aws_sigv4", "session_token"),
+    ] {
+        let section = auth.as_mut().and_then(|auth| auth.get_mut(kind));
+        let Some(section) = section.and_then(serde_json::Value::as_object_mut) else {
+            continue;
+        };
+        if !section.get(field).is_some_and(serde_json::Value::is_string) {
+            continue;
+        }
+        if let Some(serde_json::Value::String(value)) = section.remove(field) {
+            let path = format!("AUTH__{kind}__{field}").to_ascii_uppercase();
+            secrets.insert(format!("{prefix}__{path}"), value);
+        }
+    }
+}
+
 impl SecretExtractor for ElasticsearchConfig {
     fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
         take_secret(secrets, prefix, "API_KEY", &mut self.api_key);
-        // `auth` is untyped here; the paths are those of `HttpBulkConfig`.
-        for (kind, field) in [
-            ("oauth2", "client_secret"),
-            ("aws_sigv4", "secret_key"),
-            ("aws_sigv4", "session_token"),
-        ] {
-            let section = self.auth.as_mut().and_then(|auth| auth.get_mut(kind));
-            let Some(section) = section.and_then(serde_json::Value::as_object_mut) else {
-                continue;
-            };
-            if !section.get(field).is_some_and(serde_json::Value::is_string) {
-                continue;
-            }
-            if let Some(serde_json::Value::String(value)) = section.remove(field) {
-                let path = format!("AUTH__{kind}__{field}").to_ascii_uppercase();
-                secrets.insert(format!("{prefix}__{path}"), value);
-            }
-        }
+        take_auth_secrets(&mut self.auth, prefix, secrets);
     }
 }
 
@@ -698,6 +711,7 @@ named_endpoint_secrets! {
 impl SecretExtractor for LlmHostedAgentConfig {
     fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
         take_secret(secrets, prefix, "API_KEY", &mut self.api_key);
+        take_auth_secrets(&mut self.auth, prefix, secrets);
         for (i, server) in self.mcp_servers.iter_mut().enumerate() {
             take_secret(
                 secrets,
@@ -712,17 +726,15 @@ impl SecretExtractor for LlmHostedAgentConfig {
 impl SecretExtractor for LlmAgentConfig {
     fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
         take_secret(secrets, prefix, "API_KEY", &mut self.api_key);
+        take_auth_secrets(&mut self.auth, prefix, secrets);
         for (i, tool) in self.tools.iter_mut().enumerate() {
             tool.endpoint
                 .extract_secrets(&format!("{prefix}__TOOLS__{i}__ENDPOINT"), secrets);
         }
         for (i, server) in self.mcp_servers.iter_mut().enumerate() {
-            take_secret(
-                secrets,
-                &format!("{prefix}__MCP_SERVERS__{i}"),
-                "TOKEN",
-                &mut server.token,
-            );
+            let prefix = format!("{prefix}__MCP_SERVERS__{i}");
+            take_secret(secrets, &prefix, "TOKEN", &mut server.token);
+            extract_sensitive_string_map_entries(&mut server.env, &prefix, "ENV", secrets);
         }
     }
 }

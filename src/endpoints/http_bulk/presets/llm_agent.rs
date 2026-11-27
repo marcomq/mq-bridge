@@ -69,6 +69,8 @@ pub(super) struct LlmAgentPublisher {
     concurrency: usize,
     answer: LlmAnswer,
     json: bool,
+    /// The endpoint set the `json_object` format, so the system prompt mentions JSON.
+    json_hint: bool,
 }
 
 /// The parts of the publisher that come from the config alone.
@@ -79,6 +81,7 @@ struct Checked {
     prompt: Option<CompiledTemplate>,
     /// Tools from `options.tools`, sent as they are, e.g. a provider's web search.
     extra_tools: Vec<Value>,
+    json_hint: bool,
 }
 
 impl LlmAgentPublisher {
@@ -106,6 +109,7 @@ impl LlmAgentPublisher {
             concurrency: config.concurrency.unwrap_or(DEFAULT_CONCURRENCY).max(1),
             answer: config.answer,
             json: config.json,
+            json_hint: checked.json_hint,
         })
     }
 
@@ -114,7 +118,10 @@ impl LlmAgentPublisher {
         message: &CanonicalMessage,
     ) -> Result<CanonicalMessage, PublisherError> {
         let fail = PublisherError::NonRetryable;
-        let system = self.system.as_ref().map(|system| render(system, message));
+        let mut system = self.system.as_ref().map(|system| render(system, message));
+        if self.json_hint {
+            system = adapters::with_json_hint(system);
+        }
         let mut history = match &self.prompt {
             Some(prompt) => vec![adapters::user(render(prompt, message))],
             None => match serde_json::from_slice(&message.payload) {
@@ -149,6 +156,10 @@ impl LlmAgentPublisher {
                     .map_err(fail);
             }
             called = turn.calls.iter().map(|call| call.name.clone()).collect();
+            // No round is left to hand their results to.
+            if round == self.max_rounds {
+                break;
+            }
             let results: Vec<ToolResult> = futures::stream::iter(turn.calls)
                 .map(|call| self.tools.call(call))
                 .buffered(self.tool_concurrency)
@@ -230,7 +241,7 @@ fn check(config: &LlmAgentConfig) -> anyhow::Result<Checked> {
         None => Vec::new(),
         Some(_) => bail!("'options.tools' must be a JSON array"),
     };
-    adapters::prepare(
+    let json_hint = adapters::prepare(
         provider,
         &mut shared,
         &config.model,
@@ -272,6 +283,7 @@ fn check(config: &LlmAgentConfig) -> anyhow::Result<Checked> {
         system,
         prompt,
         extra_tools,
+        json_hint,
     })
 }
 

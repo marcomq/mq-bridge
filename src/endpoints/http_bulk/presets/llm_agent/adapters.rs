@@ -10,6 +10,7 @@
 use crate::models::LlmProvider;
 use anyhow::bail;
 use serde_json::{json, Map, Value};
+use std::collections::HashSet;
 
 pub(super) const ANTHROPIC_URL: &str = "https://api.anthropic.com/v1";
 const ANTHROPIC_MAX_TOKENS: u64 = 16000;
@@ -64,37 +65,52 @@ pub(super) fn own_fields(provider: LlmProvider) -> &'static [&'static str] {
     }
 }
 
-/// Puts the fields every request of the endpoint shares into `body`.
+/// Puts the fields every request of the endpoint shares into `body`. True when it set
+/// the `json_object` format, which needs [`with_json_hint`] on the system prompt.
 pub(super) fn prepare(
     provider: LlmProvider,
     body: &mut Map<String, Value>,
     model: &str,
     max_tokens: Option<u64>,
     json: bool,
-) {
+) -> bool {
     body.insert("model".into(), json!(model));
-    match provider {
-        LlmProvider::OpenAi => {
-            if json && !body.contains_key("text") {
-                body.insert("text".into(), json!({"format": {"type": "json_object"}}));
-            }
-            if let Some(max) = max_tokens {
-                body.insert("max_output_tokens".into(), json!(max));
-            }
-        }
+    let (format_field, format, max_field) = match provider {
+        LlmProvider::OpenAi => (
+            "text",
+            json!({"format": {"type": "json_object"}}),
+            "max_output_tokens",
+        ),
         LlmProvider::Anthropic => {
-            let max = max_tokens.unwrap_or(ANTHROPIC_MAX_TOKENS);
-            body.insert("max_tokens".into(), json!(max));
-        }
-        LlmProvider::OpenAiChat => {
-            if json && !body.contains_key("response_format") {
-                body.insert("response_format".into(), json!({"type": "json_object"}));
-            }
-            if let Some(max) = max_tokens {
+            if max_tokens.is_some() || !body.contains_key("max_tokens") {
+                let max = max_tokens.unwrap_or(ANTHROPIC_MAX_TOKENS);
                 body.insert("max_tokens".into(), json!(max));
             }
+            return false;
         }
+        LlmProvider::OpenAiChat => (
+            "response_format",
+            json!({"type": "json_object"}),
+            "max_tokens",
+        ),
+    };
+    if let Some(max) = max_tokens {
+        body.insert(max_field.into(), json!(max));
     }
+    let hint = json && !body.contains_key(format_field);
+    if hint {
+        body.insert(format_field.into(), format);
+    }
+    hint
+}
+
+/// `system` with the mention of JSON that the `json_object` format requires.
+pub(super) fn with_json_hint(system: Option<String>) -> Option<String> {
+    let hint = super::super::JSON_HINT;
+    Some(match system {
+        Some(system) => format!("{system}\n{hint}"),
+        None => hint.to_string(),
+    })
 }
 
 /// The tool definitions as the provider expects them.
@@ -302,10 +318,18 @@ fn parse_chat(response: Value) -> anyhow::Result<Turn> {
     }
     let mut calls = Vec::new();
     if let Some(tool_calls) = message["tool_calls"].as_array_mut() {
+        let mut taken: HashSet<String> = (tool_calls.iter())
+            .filter_map(|call| call["id"].as_str().map(str::to_string))
+            .collect();
         for (i, call) in tool_calls.iter_mut().enumerate() {
             // Some servers leave out the id; the result must name the same one.
             if !call["id"].is_string() {
-                call["id"] = json!(format!("call_{i}"));
+                let mut id = format!("call_{i}");
+                while taken.contains(&id) {
+                    id.push('_');
+                }
+                taken.insert(id.clone());
+                call["id"] = json!(id);
             }
             let name = call["function"]["name"]
                 .as_str()

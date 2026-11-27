@@ -378,7 +378,9 @@ async fn test_object_store_contract() {
         return;
     }
     // The backend is read from the environment, and changing it here would race other threads.
-    if std::env::var("AWS_ENDPOINT").as_deref() != Ok(ENDPOINT) {
+    if std::env::var("AWS_ENDPOINT").as_deref() != Ok(ENDPOINT)
+        || std::env::var("AWS_ALLOW_HTTP").as_deref() != Ok("true")
+    {
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--ignored", "--nocapture", "--exact"])
             .arg("integration::contract::test_object_store_contract")

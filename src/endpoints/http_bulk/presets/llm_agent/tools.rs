@@ -28,6 +28,8 @@ use tokio::sync::RwLock;
 type McpClient = RunningService<RoleClient, ()>;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long one MCP tool call may take before the message is retried.
+const CALL_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// A failed call: `Model` goes back to the model as an error result, `Message` fails the message.
 enum Failure {
@@ -65,6 +67,12 @@ impl Tools {
             runners: HashMap::new(),
         };
         for tool in tools {
+            if let Some(reason) = crate::endpoints::never_replies(&tool.endpoint, 0) {
+                bail!(
+                    "tool `{}`: {reason}; a tool's endpoint must answer",
+                    tool.name
+                );
+            }
             // Box::pin breaks the recursive async type, as in the lookup middleware.
             let publisher = Box::pin(create_publisher_from_route(route_name, &tool.endpoint))
                 .await
@@ -81,10 +89,12 @@ impl Tools {
         }
         for server in servers {
             let client = connect(server).await?;
-            let listed = client
-                .list_all_tools()
+            let listing = format!("listing the tools of MCP server `{}`", server.name);
+            let listed = tokio::time::timeout(CONNECT_TIMEOUT, client.list_all_tools())
                 .await
-                .with_context(|| format!("listing the tools of MCP server `{}`", server.name))?;
+                .map_err(|_| anyhow!("no answer within {}s", CONNECT_TIMEOUT.as_secs()))
+                .context(listing.clone())?
+                .context(listing)?;
             if let Some(allowed) = &server.allowed_tools {
                 if let Some(missing) = allowed
                     .iter()
@@ -189,7 +199,14 @@ impl McpServer {
         };
         let client = self.client.read().await.clone();
         let params = CallToolRequestParams::new(tool.to_string()).with_arguments(arguments);
-        match client.call_tool(params).await {
+        let Ok(called) = tokio::time::timeout(CALL_TIMEOUT, client.call_tool(params)).await else {
+            return Err(Failure::Message(PublisherError::Retryable(anyhow!(
+                "MCP server `{}`: `{tool}` gave no result within {}s",
+                self.config.name,
+                CALL_TIMEOUT.as_secs()
+            ))));
+        };
+        match called {
             Ok(result) => {
                 let result = serde_json::to_value(&result).unwrap_or_default();
                 Ok((tool_text(&result), result["isError"] == true))

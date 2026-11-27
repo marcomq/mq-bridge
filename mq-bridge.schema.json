@@ -6715,7 +6715,7 @@
           "minimum": 0
         },
         "max_tokens": {
-          "description": "Most tokens of one answer. Anthropic requires it; defaults to 16000 there.",
+          "description": "Most tokens of one answer, as `max_tokens` on chat completions. Anthropic requires it; defaults to 16000 there.",
           "type": [
             "integer",
             "null"

@@ -165,8 +165,9 @@ impl FieldType {
             Self::Text => return Ok(Value::String(raw.to_string())),
             Self::Array => {
                 // A list of objects cannot be spelled comma-separated; it comes as JSON.
-                if let Ok(list @ Value::Array(_)) = serde_json::from_str(raw) {
-                    return Ok(list);
+                if let Ok(Value::Array(list)) = serde_json::from_str(raw) {
+                    let items = list.into_iter().map(|entry| item.check(field, entry));
+                    return Ok(Value::Array(items.collect::<anyhow::Result<_>>()?));
                 }
                 let items = raw
                     .split(',')
@@ -195,6 +196,22 @@ impl FieldType {
             },
         };
         bail!("`{field}={raw}` is not {expected}, which is what this endpoint expects")
+    }
+
+    /// An element of a JSON list: kept if it has this type, coerced if it is text.
+    fn check(self, field: &str, entry: Value) -> anyhow::Result<Value> {
+        let fits = match self {
+            Self::Text => true,
+            Self::Integer => entry.is_i64() || entry.is_u64(),
+            Self::Number => entry.is_number(),
+            Self::Boolean => entry.is_boolean(),
+            Self::Array => entry.is_array(),
+        };
+        match entry {
+            entry if fits => Ok(entry),
+            Value::String(text) => self.coerce(field, &text, Self::Text),
+            entry => self.coerce(field, &entry.to_string(), Self::Text),
+        }
     }
 }
 

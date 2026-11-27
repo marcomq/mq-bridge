@@ -497,6 +497,8 @@ fn qdrant(_route: &str, value: &Value) -> anyhow::Result<Value> {
 }
 
 const OPENAI_URL: &str = "https://api.openai.com/v1";
+/// OpenAI refuses `json_object` output unless the conversation mentions JSON.
+const JSON_HINT: &str = "Answer with a JSON object.";
 
 /// The API's base URL; one without a path gets `/v1`, which every compatible server uses.
 fn openai_url(name: &str, url: Option<&str>) -> anyhow::Result<String> {
@@ -580,14 +582,24 @@ fn openai_chat(_route: &str, value: &Value) -> anyhow::Result<Value> {
     {
         bail!("'options' cannot set '{field}'");
     }
-    if config.json && !body.contains_key("response_format") {
+    // A bundle sets its own format unless `options` gives one.
+    let json_object = config.json
+        && config.messages_per_request.is_none()
+        && !body.contains_key("response_format");
+    if json_object {
         body.insert("response_format".into(), json!({"type": "json_object"}));
     }
     body.insert("model".into(), json!(config.model));
     if streams {
         body.insert("stream".into(), json!(true));
     }
-    let system = config.system.as_deref();
+    // `json_object` needs the word JSON in the messages; a payload brings its own.
+    let system = match (json_object && !config.messages_from_payload, config.system) {
+        (true, Some(system)) => Some(format!("{system}\n{JSON_HINT}")),
+        (true, None) => Some(JSON_HINT.to_string()),
+        (false, system) => system,
+    };
+    let system = system.as_deref();
     let query = match config.messages_per_request {
         Some(0) => bail!("'messages_per_request' must be at least 1"),
         Some(count) => bundled_chat(body, system, &config.prompt, config.json, count)?,
@@ -685,27 +697,35 @@ fn bundled_chat(
             {"role": "user", "content": REQUESTS}
         ]),
     );
-    // `json_object` leaves the shape open, and a `system` that names one answer's format wins.
-    // Set after `messages`, so the count is in the part of the envelope closed last.
-    let unshaped = json!({"type": "json_object"});
-    if body
-        .get("response_format")
-        .is_none_or(|format| *format == unshaped)
-    {
-        body.remove("response_format");
+    // A `system` that names one answer's format wins. Set after `messages`, so the
+    // count is in the part of the envelope closed last.
+    if !body.contains_key("response_format") {
         body.insert("response_format".into(), json!(FORMAT));
     }
-    let envelope = Value::Object(body).to_string();
     let answers_format = ANSWERS_FORMAT
         .replace("COUNT", INPUT_COUNT)
         .replace("KIND", if json { "object" } else { "string" });
+    // Only the placeholders this function inserted; `options` text may hold the same words.
+    let mut envelope = Value::Object(body).to_string();
+    for (placeholder, value) in [
+        (
+            format!(r#""content":"{REQUESTS}""#),
+            format!(r#""content":{REQUESTS}"#),
+        ),
+        (
+            format!(r#""response_format":"{FORMAT}""#),
+            format!(r#""response_format":{answers_format}"#),
+        ),
+    ] {
+        if let Some(at) = envelope.rfind(&placeholder) {
+            envelope.replace_range(at..at + placeholder.len(), &value);
+        }
+    }
     Ok(json!({
         "path": "/chat/completions",
         "format": "json_array",
         "request": json!({"type": "text", "text": format!("{{index}}: {prompt}")}).to_string(),
-        "envelope": envelope
-            .replace(&format!("\"{REQUESTS}\""), REQUESTS)
-            .replace(&format!("\"{FORMAT}\""), &answers_format),
+        "envelope": envelope,
         "max_messages": count,
         "responses_text": "/choices/0/message/content",
         "responses": "/answers",
@@ -722,10 +742,17 @@ fn answer_field(format: Option<&Value>) -> &'static str {
         .and_then(|format| format.pointer("/json_schema/schema"))
         .and_then(|schema| {
             let answers = local_schema(schema, schema.pointer("/properties/answers")?)?;
-            local_schema(schema, answers.get("items")?)?.get("properties")
+            local_schema(schema, answers.get("items")?)
         });
-    match entry {
-        Some(entry) if entry.get("answer").is_some() && entry.get("result").is_none() => "answer",
+    let required = |field: &str| {
+        let required = entry.and_then(|entry| entry.get("required")?.as_array());
+        required.is_some_and(|names| names.iter().any(|name| name == field))
+    };
+    let declared = |field: &str| entry.and_then(|entry| entry.get("properties")?.get(field));
+    match (required("answer"), required("result")) {
+        (true, false) => "answer",
+        (_, true) => "result",
+        _ if declared("answer").is_some() && declared("result").is_none() => "answer",
         _ => "result",
     }
 }

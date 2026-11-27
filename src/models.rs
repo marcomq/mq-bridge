@@ -4147,7 +4147,7 @@ pub struct LlmAgentConfig {
     pub max_rounds: Option<u32>,
     /// Tool calls of one round run at once. Defaults to 4.
     pub tool_concurrency: Option<usize>,
-    /// Most tokens of one answer. Anthropic requires it; defaults to 16000 there.
+    /// Most tokens of one answer, as `max_tokens` on chat completions. Anthropic requires it; defaults to 16000 there.
     pub max_tokens: Option<u64>,
     /// Parse the answer as JSON; openai and openai_chat are also asked for a JSON object.
     #[serde(default)]

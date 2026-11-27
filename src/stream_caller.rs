@@ -200,7 +200,27 @@ struct OpenReply {
     /// `None` once the reply fell too far behind.
     sender: Option<mpsc::Sender<Delivery>>,
     /// Token indexes seen per attempt, to drop a redelivery after a failed commit.
-    seen: HashMap<String, HashSet<usize>>,
+    seen: HashMap<String, SeenIndexes>,
+}
+
+/// Every index below `below`, and those above it in `ahead`: only out-of-order ones are kept.
+#[derive(Default)]
+struct SeenIndexes {
+    below: usize,
+    ahead: HashSet<usize>,
+}
+
+impl SeenIndexes {
+    /// False when `index` was seen before.
+    fn insert(&mut self, index: usize) -> bool {
+        if index < self.below || !self.ahead.insert(index) {
+            return false;
+        }
+        while self.ahead.remove(&self.below) {
+            self.below += 1;
+        }
+        true
+    }
 }
 
 impl OpenReply {
@@ -218,24 +238,23 @@ impl OpenReply {
         if attempt.is_empty() || token.0.get_metadata(STREAM_INDEX).is_none() {
             return false;
         }
-        match self.seen.get_mut(attempt) {
-            Some(indexes) => !indexes.insert(token.index()),
-            None => {
-                let indexes = HashSet::from([token.index()]);
-                self.seen.insert(attempt.to_string(), indexes);
-                false
-            }
+        if !self.seen.contains_key(attempt) {
+            self.seen
+                .insert(attempt.to_string(), SeenIndexes::default());
         }
+        let indexes = self.seen.get_mut(attempt).expect("inserted above");
+        !indexes.insert(token.index())
     }
 
     /// Never waits, so that one slow reply cannot hold up the others.
     fn deliver(&mut self, token: StreamToken) {
-        if self.is_redelivery(&token) {
+        if self.sender.is_none() || self.is_redelivery(&token) {
             return;
         }
         if let Some(sender) = &self.sender {
             if sender.try_send(Ok(token)).is_err() {
                 self.sender = None;
+                self.seen.clear();
             }
         }
     }

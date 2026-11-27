@@ -9,11 +9,12 @@ use super::{bearer, nested, openai_url, with_tls};
 use crate::endpoints::http_bulk::HttpBulkPublisher;
 use crate::errors::PublisherError;
 use crate::models::{LlmAnswer, LlmHostedAgentConfig, LlmHostedMcpServer, LlmHostedProvider};
-use crate::outcomes::SentBatch;
+use crate::outcomes::{Sent, SentBatch};
 use crate::traits::MessagePublisher;
 use crate::CanonicalMessage;
 use anyhow::{anyhow, bail};
 use async_trait::async_trait;
+use futures::StreamExt;
 use serde_json::{json, Map, Value};
 
 const ANTHROPIC_URL: &str = "https://api.anthropic.com/v1";
@@ -89,12 +90,18 @@ fn openai_body(
     mut tools: Vec<Value>,
 ) -> anyhow::Result<(&'static str, Map<String, Value>)> {
     refuse(body, &["model", "input", "instructions", "stream"])?;
+    let mut instructions = config.system.clone();
     if config.json && !body.contains_key("text") {
         body.insert("text".into(), json!({"format": {"type": "json_object"}}));
+        let hint = super::JSON_HINT;
+        instructions = Some(match instructions {
+            Some(system) => format!("{system}\n{hint}"),
+            None => hint.to_string(),
+        });
     }
     body.insert("model".into(), json!(config.model));
-    if let Some(system) = &config.system {
-        body.insert("instructions".into(), json!(system));
+    if let Some(instructions) = instructions {
+        body.insert("instructions".into(), json!(instructions));
     }
     if let Some(max) = config.max_tokens {
         body.insert("max_output_tokens".into(), json!(max));
@@ -131,10 +138,10 @@ fn anthropic_body(
         &["model", "messages", "system", "stream", "mcp_servers"],
     )?;
     body.insert("model".into(), json!(config.model));
-    body.insert(
-        "max_tokens".into(),
-        json!(config.max_tokens.unwrap_or(ANTHROPIC_MAX_TOKENS)),
-    );
+    if config.max_tokens.is_some() || !body.contains_key("max_tokens") {
+        let max = config.max_tokens.unwrap_or(ANTHROPIC_MAX_TOKENS);
+        body.insert("max_tokens".into(), json!(max));
+    }
     if let Some(system) = &config.system {
         body.insert("system".into(), json!(system));
     }
@@ -196,6 +203,7 @@ pub(super) struct LlmHostedAgentPublisher {
     provider: LlmHostedProvider,
     answer: LlmAnswer,
     json: bool,
+    concurrency: usize,
 }
 
 impl LlmHostedAgentPublisher {
@@ -206,6 +214,7 @@ impl LlmHostedAgentPublisher {
             provider: config.provider,
             answer: config.answer,
             json: config.json,
+            concurrency: config.concurrency.unwrap_or(8).max(1),
         })
     }
 
@@ -312,28 +321,29 @@ impl MessagePublisher for LlmHostedAgentPublisher {
         if self.answer == LlmAnswer::Full {
             return self.inner.send_batch(messages).await;
         }
-        let originals = messages.clone();
-        let (responses, refused) = match self.inner.send_batch(messages).await? {
-            SentBatch::Partial {
-                responses: Some(responses),
-                failed,
-            } => (responses, failed),
-            other => return Ok(other),
-        };
-        // Both lists keep the input order and every message is in one of them.
-        let mut skipped = refused.iter().peekable();
-        let mut responses = responses.into_iter();
-        let mut answers = Vec::with_capacity(responses.len());
+        // One send per message keeps each outcome with its own input.
+        let outcomes: Vec<_> = futures::stream::iter(messages)
+            .map(|message| async move {
+                let outcome = self.inner.send(message.clone()).await;
+                (message, outcome)
+            })
+            .buffered(self.concurrency)
+            .collect()
+            .await;
+        let mut answers = Vec::with_capacity(outcomes.len());
         let mut failed = Vec::new();
-        for original in originals {
-            let is_refused = |(message, _): &&(CanonicalMessage, PublisherError)| {
-                message.message_id == original.message_id && message.payload == original.payload
-            };
-            if skipped.next_if(is_refused).is_some() {
-                continue;
-            }
-            let Some(response) = responses.next() else {
-                break;
+        for (original, outcome) in outcomes {
+            let response = match outcome {
+                Ok(Sent::Response(response)) => response,
+                Ok(Sent::Ack) => {
+                    let error = anyhow!("the model API gave no response");
+                    failed.push((original, PublisherError::NonRetryable(error)));
+                    continue;
+                }
+                Err(error) => {
+                    failed.push((original, error));
+                    continue;
+                }
             };
             let answer = serde_json::from_slice(&response.payload)
                 .map_err(anyhow::Error::from)
@@ -346,7 +356,6 @@ impl MessagePublisher for LlmHostedAgentPublisher {
                 Err(error) => failed.push((original, PublisherError::NonRetryable(error))),
             }
         }
-        failed.extend(refused);
         Ok(SentBatch::Partial {
             responses: Some(answers),
             failed,
