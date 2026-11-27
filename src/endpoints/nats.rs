@@ -1197,8 +1197,8 @@ mod tests {
             let (mut stream, _) = listener.accept().await.unwrap();
             let info = "INFO {\"server_id\":\"x\",\"server_name\":\"x\",\"host\":\"127.0.0.1\",\"port\":4222,\"version\":\"2.10.0\",\"go\":\"go\",\"proto\":1,\"headers\":true,\"max_payload\":1048576}\r\n";
             stream.write_all(info.as_bytes()).await.unwrap();
-            let mut first = [0u8; 7];
-            stream.read_exact(&mut first).await.unwrap();
+            let mut first = Vec::new();
+            (&mut stream).take(7).read_to_end(&mut first).await.unwrap();
             first
         });
         let config = NatsConfig {
@@ -1218,7 +1218,11 @@ mod tests {
         let _ = tokio::time::timeout(second, options.connect(&config.url)).await;
 
         let first = tokio::time::timeout(second, server).await.unwrap().unwrap();
-        assert_ne!(&first, b"CONNECT", "the client went on without TLS");
+        assert_ne!(
+            first.as_slice(),
+            b"CONNECT",
+            "the client went on without TLS"
+        );
     }
 
     #[test]

@@ -332,7 +332,10 @@ mod tests {
     }
 
     fn meta(message: &CanonicalMessage, key: &str) -> String {
-        message.get_metadata(key).map(|v| v.to_string()).unwrap_or_default()
+        message
+            .get_metadata(key)
+            .map(|v| v.to_string())
+            .unwrap_or_default()
     }
 
     #[tokio::test]
@@ -367,7 +370,9 @@ mod tests {
         }))
         .await
         .unwrap();
-        let sent = publisher.send_batch(vec![r#"{"city":"Bonn"}"#.into()]).await;
+        let sent = publisher
+            .send_batch(vec![r#"{"city":"Bonn"}"#.into()])
+            .await;
         let (answers, failed) = split(sent.unwrap());
         assert!(failed.is_empty(), "{failed:?}");
         assert_eq!(answers[0].get_payload_str(), r#""It is sunny.""#);
@@ -386,8 +391,14 @@ mod tests {
                     "description": "Weather of a city", "parameters": {"type": "object"}}}])
         );
         let messages = body(&requests[1])["messages"].clone();
-        assert_eq!(messages[0], json!({"role": "system", "content": "Be brief."}));
-        assert_eq!(messages[1], json!({"role": "user", "content": "Weather in Bonn?"}));
+        assert_eq!(
+            messages[0],
+            json!({"role": "system", "content": "Be brief."})
+        );
+        assert_eq!(
+            messages[1],
+            json!({"role": "user", "content": "Weather in Bonn?"})
+        );
         assert_eq!(messages[2]["reasoning_content"], "thinking");
         assert_eq!(messages[2]["tool_calls"][2]["id"], "call_2");
         assert_eq!(
@@ -395,9 +406,15 @@ mod tests {
             json!({"role": "tool", "tool_call_id": "a", "content": "sunny"})
         );
         assert_eq!(messages[4]["tool_call_id"], "b");
-        assert!(messages[4]["content"].as_str().unwrap().contains("no tool `missing`"));
+        assert!(messages[4]["content"]
+            .as_str()
+            .unwrap()
+            .contains("no tool `missing`"));
         assert_eq!(messages[5]["tool_call_id"], "call_2");
-        assert!(messages[5]["content"].as_str().unwrap().contains("not JSON"));
+        assert!(messages[5]["content"]
+            .as_str()
+            .unwrap()
+            .contains("not JSON"));
     }
 
     #[tokio::test]
@@ -532,7 +549,10 @@ mod tests {
             ),
         ] {
             let refused = publisher(config).await.err().expect("refused");
-            assert!(format!("{refused:#}").contains(error), "{error}: {refused:#}");
+            assert!(
+                format!("{refused:#}").contains(error),
+                "{error}: {refused:#}"
+            );
         }
     }
 
@@ -568,7 +588,12 @@ mod tests {
         let mcp = StubHttpServer::start(mcp_answer).await.expect("mcp stub");
         let model = StubHttpServer::start(|request| {
             let messages = body(request)["messages"].clone();
-            let answer = match messages.as_array().unwrap().iter().find(|m| m["role"] == "tool") {
+            let answer = match messages
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|m| m["role"] == "tool")
+            {
                 Some(result) => json!({"choices": [{"message": {
                     "role": "assistant", "content": result["content"]}}]}),
                 None => json!({"choices": [{"message": {"role": "assistant", "tool_calls": [
@@ -617,6 +642,9 @@ mod tests {
         .await
         .err()
         .expect("refused");
-        assert!(format!("{refused:#}").contains("has no tool `gone`"), "{refused:#}");
+        assert!(
+            format!("{refused:#}").contains("has no tool `gone`"),
+            "{refused:#}"
+        );
     }
 }

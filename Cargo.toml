@@ -160,7 +160,7 @@ metrics = { version = "0.24", optional = true }
 # Tracing: API only; the host installs the SDK and exporter.
 opentelemetry = { version = "0.33", optional = true, default-features = false, features = ["trace"] }
 # Avro payloads with a Confluent Schema Registry.
-apache-avro = { version = "0.22", optional = true }
+apache-avro = { version = "0.23", optional = true }
 
 # Storage for Deduplication
 sled = { version = "0.34", optional = true }
@@ -176,7 +176,7 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"], optio
 # --- Optional Endpoint Dependencies ---
 
 # Kafka
-rdkafka = { version = "0.39", default-features = false, features = ["tokio"], optional = true }
+rdkafka = { version = "0.40", default-features = false, features = ["tokio"], optional = true }
 
 # AMQP (RabbitMQ).
 # Drop lapin's defaults so the crypto provider remains wired through
@@ -192,7 +192,7 @@ mongodb = { version = "3.8", optional = true, features = ["cert-key-password"] }
 object_store = { version = "0.14", optional = true, default-features = false, features = ["aws", "gcp", "azure", "http", "fs"] }
 
 # NATS
-async-nats = { version = "0.52", optional = true }
+async-nats = { version = "0.53", optional = true }
 
 # MQTT.
 # `use-rustls-no-provider` pulls tokio-rustls without a crypto provider (its
@@ -275,7 +275,7 @@ zeromq = { version = "0.7", optional = true }
 # Default ZeroMQ backend (`backend: try_omq`). Faster than libzmq per its
 # benchmarks and adds CURVE/PLAIN security. Pure Rust without default
 # features; needs MSRV 1.93 / edition 2024.
-omq-tokio = { version = "0.36", optional = true }
+omq-tokio = { version = "0.38", optional = true }
 
 # Redis Streams. Pure-Rust client (no C bindings). TLS via rustls (ring), so
 # `rediss://` URLs work; webpki-roots ships the CA bundle so there's no system
@@ -344,7 +344,7 @@ link-dynamic = ["rdkafka?/dynamic-linking"]
 
 # The feature set for lint and doc builds. NOT `--all-features`: that turns on
 # `link-dynamic`, whose rdkafka-sys build script probes pkg-config for
-# librdkafka >= 2.12.1 and fails where none is installed. Everything else that
+# librdkafka >= 2.16.0 and fails where none is installed. Everything else that
 # gates code is here, `ibm-mq-static` included -- clippy never links, so it needs
 # no IBM SDK.
 lint-all = ["full", "test-utils", "schema", "plugin-sdk", "perf-diagnostics", "float-roundtrip", "ibm-mq-static", "rustls-ring"]
@@ -553,7 +553,7 @@ required-features = ["test-utils"]
 libc = { version = "0.2", optional = true }
 
 [target.'cfg(windows)'.dependencies.rdkafka]
-version = "0.39"
+version = "0.40"
 default-features = false
 features = ["cmake-build", "tokio"]
 optional = true
