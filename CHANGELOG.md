@@ -61,14 +61,16 @@ All notable changes to `mq-bridge`. Newest first.
   bound as a float and silently rounded. It now binds as text, as `columns: auto` already
   does. A query writing such a value into a PostgreSQL `float8` or `numeric` column without
   a cast now fails with error `42804`; write `CAST(${payload:x} AS numeric)` there.
-- **`link-dynamic` / `full-dynamic` needs librdkafka 2.16.0 or newer.** rdkafka moves to
-  0.40 (bundled librdkafka 2.16.0), and its build script now probes pkg-config for
+- **The minimum Rust version is 1.91**, up from 1.89: amq-protocol 10.8 and newer need it.
+- **`link-dynamic` / `full-dynamic` needs librdkafka 2.16.0 or newer.** rdkafka-sys moves to
+  4.11 (bundled librdkafka 2.16.0), and its build script now probes pkg-config for
   librdkafka >= 2.16.0. A build against an older system or conda-forge librdkafka fails;
-  update librdkafka there first. Also bumps async-nats 0.53, apache-avro 0.23 and
-  omq-tokio 0.38. async-nats now refuses a server that offers no TLS when `tls.required`
-  is set, before the handshake instead of during it. The re-exports `mq_bridge::rdkafka`
-  and `mq_bridge::async_nats` follow: code that mixes them with its own `rdkafka = "0.39"`
-  or `async-nats = "0.52"` must move to 0.40 and 0.53 as well.
+  update librdkafka there first. rdkafka itself stays at 0.39: 0.40 would force every
+  crate that uses rdkafka next to mq-bridge to move as well, since only one librdkafka can
+  be linked. Also bumps async-nats 0.53, apache-avro 0.23 and omq-tokio 0.38. async-nats
+  now refuses a server that offers no TLS when `tls.required` is set, before the handshake
+  instead of during it. The re-export `mq_bridge::async_nats` follows: code that mixes it
+  with its own `async-nats = "0.52"` must move to 0.53 as well.
 
 ### Fixed
 - **`ThreadedHandler` no longer runs a queued message whose caller gave up.** After a timeout or an

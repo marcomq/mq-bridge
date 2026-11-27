@@ -3,7 +3,7 @@ name = "mq-bridge"
 version.workspace = true
 edition = "2024"
 authors = ["Marco Mengelkoch"]
-rust-version = "1.89"  # With the checked-in lock; `aws`, `sqlx`, `postgres-cdc` and `full` need 1.94.1. CI job `msrv` tests both.
+rust-version = "1.91"  # With the checked-in lock; `aws`, `sqlx`, `postgres-cdc` and `full` need 1.94.1. CI job `msrv` tests both.
 description = "Embeddable async ETL and messaging library: brokers (Kafka, NATS, AMQP, MQTT), databases incl. Postgres/MongoDB CDC, Parquet on S3/GCS/Azure object storage, HTTP/gRPC."
 repository = "https://github.com/marcomq/mq-bridge"
 homepage = "https://marcomq.github.io/mq-bridge/"
@@ -115,7 +115,7 @@ serde = { workspace = true, features = ["derive"] }
 anyhow.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "net", "signal"] }
 # Note on MSRV for optional features:
-# The crate MSRV is 1.89 (uuid 1.27, in every build); these features need more:
+# The crate MSRV is 1.91 (amq-protocol 10.8+ with `amqp`); these features need more:
 # - "aws" (aws-sdk-*) requires Rust 1.94.1, and so does "full".
 # - "sqlx" and "postgres-cdc" (sqlx 0.9) require Rust 1.94.
 # - "zeromq-omq" (omq 0.33) requires Rust 1.93.
@@ -176,7 +176,10 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"], optio
 # --- Optional Endpoint Dependencies ---
 
 # Kafka
-rdkafka = { version = "0.40", default-features = false, features = ["tokio"], optional = true }
+rdkafka = { version = "0.39", default-features = false, features = ["tokio"], optional = true }
+# Unused in code: lifts the bundled librdkafka to 2.16.0 for its security fixes while rdkafka
+# stays at 0.39 (0.40 changes the `mq_bridge::rdkafka` re-export; planned for 2.0).
+rdkafka-sys = { version = "4.11", default-features = false, optional = true }
 
 # AMQP (RabbitMQ).
 # Drop lapin's defaults so the crypto provider remains wired through
@@ -425,7 +428,7 @@ url = []
 file = ["dep:libc"]
 # `dir_spool` endpoint: crash-safe directory FIFO queue.
 dir-spool = ["dep:pidlock"]
-kafka = ["rdkafka", "rdkafka/libz-static"]
+kafka = ["rdkafka", "dep:rdkafka-sys", "rdkafka/libz-static"]
 # TLS and SASL for the bundled librdkafka, which has neither without OpenSSL. Compiles
 # OpenSSL from source: needs perl and make, and adds minutes to a clean build.
 kafka-ssl = ["kafka", "rdkafka/ssl-vendored"]
@@ -553,7 +556,7 @@ required-features = ["test-utils"]
 libc = { version = "0.2", optional = true }
 
 [target.'cfg(windows)'.dependencies.rdkafka]
-version = "0.40"
+version = "0.39"
 default-features = false
 features = ["cmake-build", "tokio"]
 optional = true

@@ -2896,7 +2896,7 @@ Source: https://github.com/RustCrypto/block-ciphers
 Copyright/attribution: Copyright (c) 2017 Damian Czaja
 Copyright/attribution: Copyright 2017 Damian Czaja
 
-rdkafka-sys@4.10.0+2.12.1
+rdkafka-sys@4.11.0+2.16.0
 License: MIT
 Source: https://github.com/fede1024/rust-rdkafka
 Copyright/attribution: Copyright (c) 2016 Federico Giraud

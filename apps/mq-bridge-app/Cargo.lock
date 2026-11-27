@@ -4813,6 +4813,7 @@ dependencies = [
  "protoc-bin-vendored",
  "rand 0.10.4",
  "rdkafka",
+ "rdkafka-sys",
  "redis",
  "reqwest",
  "rmcp",
@@ -6975,9 +6976,9 @@ dependencies = [
 
 [[package]]
 name = "rdkafka"
-version = "0.40.0"
+version = "0.39.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41efe6cce81066ae2e5ece4b64e8eee0602ef0f757506a04c0731c17d9dbd04f"
+checksum = "d7956f9ac12b5712e50372d9749a3102f4810a8d42481c5eae3748d36d585bcf"
 dependencies = [
  "futures-channel",
  "futures-util",

@@ -48,7 +48,7 @@ config = { version = "0.15.25", features = ["yaml"] }
 dotenvy = "0.15.7"
 shellexpand = "3.1.2"
 serde_yaml_ng = "0.10.0"
-rdkafka = { version = "0.40.0", features = ["tokio"], optional = true }
+rdkafka = { version = "0.39.0", features = ["tokio"], optional = true }
 base64 = "0.23"
 aes-gcm = { version = "0.11.0", features = ["zeroize"] }
 zeroize = "1.9"

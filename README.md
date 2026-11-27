@@ -232,7 +232,7 @@ Since 1.0 the Rust API follows semantic versioning: the crate root and the modul
 
 A minor release may add a configuration field, a variant of a configuration or error enum, and raise the minimum Rust version. Code that writes config structs with `..Default::default()` and gives a `match` on these enums a `_` arm compiles unchanged across such releases.
 
-The minimum Rust version is 1.89. The features `aws`, `sqlx` and `postgres-cdc`, and so `full`, need 1.94.1; `zeromq-omq` needs 1.93.
+The minimum Rust version is 1.91. The features `aws`, `sqlx` and `postgres-cdc`, and so `full`, need 1.94.1; `zeromq-omq` needs 1.93.
 
 Without default features the crate pulls 99 crates; pinning `idna_adapter = "=1.0.0"` in your own `Cargo.toml` drops that to 81 (ASCII-only host names in URLs, and `xn--` Punycode labels are no longer checked against UTS 46, so an invalid internationalized host name is accepted). Endpoints you don't compile in can come from the prebuilt full plugin at runtime, see [PLUGINS.md](docs/PLUGINS.md#all-built-in-endpoints-as-one-plugin).
 
