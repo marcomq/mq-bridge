@@ -124,7 +124,7 @@ struct OsSignals {
 #[cfg(unix)]
 impl OsSignals {
     fn new() -> std::io::Result<Self> {
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
         Ok(Self {
             sigint: signal(SignalKind::interrupt())?,
             sigterm: signal(SignalKind::terminate())?,

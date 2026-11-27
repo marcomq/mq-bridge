@@ -9,10 +9,10 @@
 //! - `schema` is the typing transform the published CSV benchmark runs.
 //! - `expression` is the zen path, which has no fast route at all.
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use mq_bridge::CanonicalMessage;
 use mq_bridge::models::TransformMiddleware;
 use mq_bridge::test_utils::bench::{filter_matches, transform_messages};
-use mq_bridge::CanonicalMessage;
 
 const ROWS: usize = 20_000;
 

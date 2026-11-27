@@ -10,7 +10,7 @@
 
 use crate::endpoints::postgres::state::{format_lsn, parse_lsn};
 use crate::models::{CaRoots, PostgresCdcConfig};
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use percent_encoding::percent_decode_str;
 use pgwire_replication::{Lsn, ReplicationClient, ReplicationConfig, TlsConfig as PgTlsConfig};
 use sqlx::postgres::PgConnectOptions;
@@ -553,7 +553,7 @@ async fn add_missing_publication_tables(
             Err(e) => {
                 return Err(anyhow!(
                     "postgres-cdc: add table '{t}' to publication failed: {e}"
-                ))
+                ));
             }
         }
     }

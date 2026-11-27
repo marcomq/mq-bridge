@@ -1,15 +1,16 @@
 #![allow(dead_code, unused_imports)]
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 
+use mq_bridge::CanonicalMessage;
 use mq_bridge::test_utils::{run_test_with_docker, setup_logging};
 use mq_bridge::traits::{MessageConsumer, MessagePublisher};
-use mq_bridge::CanonicalMessage;
 use mq_bridge::{
+    Handled, Route,
     models::{Endpoint, Middleware, RetryMiddleware},
-    msg, Handled, Route,
+    msg,
 };
 use serde::{Deserialize, Serialize};
 use std::env;
@@ -184,9 +185,9 @@ pub async fn test_kafka_request_reply() {
 
 #[cfg(feature = "kafka")]
 pub async fn test_kafka_request_reply_multiple_sequential() {
+    use mq_bridge::CanonicalMessage;
     use mq_bridge::endpoints::kafka::{KafkaConsumer, KafkaPublisher};
     use mq_bridge::models::KafkaConfig;
-    use mq_bridge::CanonicalMessage;
     use std::collections::HashSet;
     setup_logging();
     run_test_with_docker("tests/integration/docker-compose/kafka.yml", || async {
@@ -268,9 +269,9 @@ pub async fn test_kafka_request_reply_multiple_sequential() {
 
 #[cfg(feature = "kafka")]
 pub async fn test_kafka_request_reply_lost_response() {
+    use mq_bridge::CanonicalMessage;
     use mq_bridge::endpoints::kafka::{KafkaConsumer, KafkaPublisher};
     use mq_bridge::models::KafkaConfig;
-    use mq_bridge::CanonicalMessage;
     setup_logging();
     run_test_with_docker("tests/integration/docker-compose/kafka.yml", || async {
         let request_topic = format!("test_req_rep_lost_{}", fast_uuid_v7::gen_id_str());
@@ -480,9 +481,9 @@ pub async fn test_mongodb_request_reply_pattern() {
 
 #[cfg(feature = "mongodb")]
 pub async fn test_mongodb_request_reply_multiple_sequential() {
+    use mq_bridge::CanonicalMessage;
     use mq_bridge::endpoints::mongodb::{MongoDbConsumer, MongoDbPublisher};
     use mq_bridge::traits::Sent;
-    use mq_bridge::CanonicalMessage;
     setup_logging();
     run_test_with_docker("tests/integration/docker-compose/mongodb.yml", || async {
         let req_collection = format!("req_rep_collection_{}", fast_uuid_v7::gen_id_str());
@@ -1212,8 +1213,8 @@ async fn test_custom_components_yaml_configuration() {
         CustomEndpointFactory, CustomMiddlewareFactory, MessageConsumer, MessagePublisher,
     };
     use std::sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     };
 
     // Define Custom Factories
@@ -1326,13 +1327,13 @@ async fn test_custom_components_yaml_configuration() {
 
 pub async fn test_memory_request_reply() {
     use fast_uuid_v7::gen_id_str;
+    use mq_bridge::CanonicalMessage;
+    use mq_bridge::Handled;
+    use mq_bridge::Route;
     use mq_bridge::endpoints::memory::MemoryPublisher;
     use mq_bridge::models::Endpoint;
     use mq_bridge::models::MemoryConfig;
     use mq_bridge::traits::Sent;
-    use mq_bridge::CanonicalMessage;
-    use mq_bridge::Handled;
-    use mq_bridge::Route;
 
     let topic = format!("mem_rr_topic_{}", gen_id_str());
     let input_endpoint = Endpoint::new_memory(&topic, 10);
@@ -1378,12 +1379,12 @@ pub async fn test_memory_request_reply() {
 
 pub async fn test_memory_request_reply_multiple_sequential() {
     use fast_uuid_v7::gen_id_str;
-    use mq_bridge::endpoints::memory::MemoryPublisher;
-    use mq_bridge::models::{Endpoint, MemoryConfig};
-    use mq_bridge::traits::Sent;
     use mq_bridge::CanonicalMessage;
     use mq_bridge::Handled;
     use mq_bridge::Route;
+    use mq_bridge::endpoints::memory::MemoryPublisher;
+    use mq_bridge::models::{Endpoint, MemoryConfig};
+    use mq_bridge::traits::Sent;
 
     let topic = format!("mem_rr_multi_seq_{}", gen_id_str());
     let input_endpoint = Endpoint::new_memory(&topic, 100);
@@ -1432,12 +1433,12 @@ pub async fn test_memory_request_reply_multiple_sequential() {
 
 pub async fn test_memory_request_reply_multiple_concurrent() {
     use fast_uuid_v7::gen_id_str;
-    use mq_bridge::endpoints::memory::MemoryPublisher;
-    use mq_bridge::models::{Endpoint, MemoryConfig};
-    use mq_bridge::traits::Sent;
     use mq_bridge::CanonicalMessage;
     use mq_bridge::Handled;
     use mq_bridge::Route;
+    use mq_bridge::endpoints::memory::MemoryPublisher;
+    use mq_bridge::models::{Endpoint, MemoryConfig};
+    use mq_bridge::traits::Sent;
 
     let topic = format!("mem_rr_multi_con_{}", gen_id_str());
     let input_endpoint = Endpoint::new_memory(&topic, 100);

@@ -1,15 +1,15 @@
+use crate::CanonicalMessage;
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::{ZeroMqConfig, ZeroMqFormat, ZeroMqSocketType};
 use crate::traits::{
     BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
     MessagePublisher, PublisherError, ReceivedBatch, SentBatch,
 };
-use crate::CanonicalMessage;
 use anyhow::anyhow;
-use async_channel::{bounded, Receiver, Sender};
+use async_channel::{Receiver, Sender, bounded};
 use async_trait::async_trait;
-use futures::channel::mpsc;
 use futures::StreamExt;
+use futures::channel::mpsc;
 use std::any::Any;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -82,7 +82,7 @@ impl SenderSocket {
                 return Err(anyhow!(
                     "Unsupported socket type for publisher: {:?}",
                     other
-                ))
+                ));
             }
         })
     }
@@ -730,8 +730,8 @@ impl MessageConsumer for ZeroMqConsumer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::ZeroMqConfig;
     use crate::CanonicalMessage;
+    use crate::models::ZeroMqConfig;
     use tokio::time::Duration;
 
     #[tokio::test]

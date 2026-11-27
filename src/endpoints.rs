@@ -57,7 +57,7 @@ pub mod structural;
 pub mod websocket;
 #[cfg(any(feature = "zeromq", feature = "zeromq-omq"))]
 pub mod zeromq;
-use crate::endpoints::memory::{get_or_create_channel, MemoryChannel};
+use crate::endpoints::memory::{MemoryChannel, get_or_create_channel};
 /// Backwards-compatible aliases for the structural endpoints, which used to live
 /// directly under `endpoints`. Prefer `endpoints::structural::*`.
 #[doc(hidden)]
@@ -73,7 +73,7 @@ use crate::models::{
 };
 use crate::route::{get_endpoint, get_endpoint_factory};
 use crate::traits::{BoxFuture, CustomEndpointFactory, MessageConsumer, MessagePublisher};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::sync::Arc;
 
 impl Endpoint {
@@ -2560,7 +2560,11 @@ fn create_publisher_with_depth(
 
             if endpoint.handler.is_some() {
                 if merged.handler.is_some() {
-                    return Err(anyhow!("[route:{}] Both ref endpoint and referenced endpoint '{}' have handlers defined. This is ambiguous.", route_name, name));
+                    return Err(anyhow!(
+                        "[route:{}] Both ref endpoint and referenced endpoint '{}' have handlers defined. This is ambiguous.",
+                        route_name,
+                        name
+                    ));
                 }
                 merged.handler = endpoint.handler;
             }
@@ -2839,8 +2843,8 @@ Fix: enable the `rustls-ring` or `rustls-aws-lc` feature of mq-bridge, or call `
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{Endpoint, EndpointType};
     use crate::CanonicalMessage;
+    use crate::models::{Endpoint, EndpointType};
 
     fn file_named_by(name_by: NameBy) -> Endpoint {
         let mut config = crate::models::FileConfig::new("/tmp/parts");
@@ -3000,9 +3004,11 @@ mod tests {
             Ok(_) => panic!("memory has no durable source position"),
             Err(error) => error,
         };
-        assert!(error
-            .to_string()
-            .contains("requires an input that carries a replay position"));
+        assert!(
+            error
+                .to_string()
+                .contains("requires an input that carries a replay position")
+        );
     }
 
     /// NATS emits `mqb.src.*` provenance but no replayable offset. The guard must reject it up
@@ -3023,9 +3029,11 @@ mod tests {
             Ok(_) => panic!("a NATS subject is not a replay position"),
             Err(error) => error,
         };
-        assert!(error
-            .to_string()
-            .contains("requires an input that carries a replay position"));
+        assert!(
+            error
+                .to_string()
+                .contains("requires an input that carries a replay position")
+        );
     }
 
     /// The route derives `source_metadata` from an idempotent output, so a plain `file`
@@ -3337,9 +3345,11 @@ mod tests {
         let endpoint = Endpoint::new(EndpointType::Memory(config));
 
         let warnings = check_consumer("test_route", &endpoint, None).unwrap();
-        assert!(warnings
-            .iter()
-            .any(|w| w.contains("request_reply") && w.contains("publisher-only")));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("request_reply") && w.contains("publisher-only"))
+        );
     }
 
     #[cfg(feature = "object-store")]
@@ -3442,14 +3452,16 @@ mod tests {
         /// request for replay-safe names, and the fragmentation is its price.
         #[test]
         fn an_explicitly_named_sink_keeps_source_position_under_a_filter() {
-            assert!(relax_object_naming(
-                "test",
-                true,
-                &filtered_source(),
-                &bucket(NameBy::SourcePosition)
-            )
-            .unwrap()
-            .is_none());
+            assert!(
+                relax_object_naming(
+                    "test",
+                    true,
+                    &filtered_source(),
+                    &bucket(NameBy::SourcePosition)
+                )
+                .unwrap()
+                .is_none()
+            );
         }
 
         /// `idempotency: true` is the deprecated spelling of the same explicit request.
@@ -3461,9 +3473,11 @@ mod tests {
                 ..Default::default()
             }));
 
-            assert!(relax_object_naming("test", true, &filtered_source(), &sink)
-                .unwrap()
-                .is_none());
+            assert!(
+                relax_object_naming("test", true, &filtered_source(), &sink)
+                    .unwrap()
+                    .is_none()
+            );
         }
 
         /// The filter is the newest dropper, but three older ones fragment identically.
@@ -3576,14 +3590,16 @@ mod tests {
         /// different sink structures there. Nothing to relax.
         #[test]
         fn a_file_sink_is_left_untouched() {
-            assert!(relax_object_naming(
-                "test",
-                true,
-                &filtered_source(),
-                &file_named_by(NameBy::Auto)
-            )
-            .unwrap()
-            .is_none());
+            assert!(
+                relax_object_naming(
+                    "test",
+                    true,
+                    &filtered_source(),
+                    &file_named_by(NameBy::Auto)
+                )
+                .unwrap()
+                .is_none()
+            );
         }
 
         /// A `when` switch with no `default` drops whatever matches nothing, so its own cases
@@ -3643,14 +3659,16 @@ mod tests {
 
             // With a default every message still lands somewhere, so the switch itself drops
             // nothing and the naming is left to the route's own middlewares.
-            assert!(relax_object_naming(
-                "test",
-                true,
-                &ordinary,
-                &switch_to(bucket(NameBy::Auto), Some(ordinary.clone()))
-            )
-            .unwrap()
-            .is_none());
+            assert!(
+                relax_object_naming(
+                    "test",
+                    true,
+                    &ordinary,
+                    &switch_to(bucket(NameBy::Auto), Some(ordinary.clone()))
+                )
+                .unwrap()
+                .is_none()
+            );
         }
     }
 

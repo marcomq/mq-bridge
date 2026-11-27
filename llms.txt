@@ -11,6 +11,24 @@ Key facts:
 - The `memory` endpoint runs routes and handlers in-process, so tests need no broker and no Docker.
 - This book documents the library and the app; connectors, middleware and tuning use the same settings in both.
 
+## For coding agents
+
+Use the documentation of the version the project actually runs. This site follows the newest release.
+
+- Rust dependency: the crate ships `llms.txt` and `docs/` for its exact version. Find it with `cargo metadata --format-version 1 | jq -r '.packages[] | select(.name=="mq-bridge") | .manifest_path'`. API docs are at `https://docs.rs/mq-bridge/<version>`.
+- YAML or JSON config: read `docs/REFERENCE.md` for middleware and structural endpoints and `docs/CONFIGURATION.md` for the grammar. Do not infer field names from `models.rs`.
+- Endpoint and middleware fields: `mqb describe <name> --json`, or the `describe` tool of the MCP server. These report the installed `mqb`, which can differ from the crate version in `Cargo.lock`; check with `mqb --version` or the MCP tool `server_info`.
+- Rust handlers, `emit`, cancelling and streamed answers: `docs/HANDLERS.md` (from 1.7.0).
+
+To make this stick in a project that uses mq-bridge, add this to its `AGENTS.md` or `CLAUDE.md`:
+
+```markdown
+## mq-bridge
+- Use the docs of the locked version: `cargo metadata --format-version 1 | jq -r '.packages[] | select(.name=="mq-bridge") | .manifest_path'`, then read `llms.txt` and `docs/` next to that file.
+- Config: `docs/REFERENCE.md`, plus `mqb describe <name> --json` or the MCP `describe` tool. Rust handlers and streaming: `docs/HANDLERS.md`.
+- Before calling something a gap in mq-bridge, check it against the locked version and the changelog.
+```
+
 ## Getting started
 
 - [Quick start: library](https://marcomq.github.io/mq-bridge/getting-started/library-quick-start.html): install, describe a route, run it from Rust, Python or Node.js
@@ -49,7 +67,7 @@ Problem-first guides, each with a runnable example in `examples/` that CI execut
 - [HTTP bulk](https://marcomq.github.io/mq-bridge/connectors/http-bulk.html): JSON documents in bulk to and from search engines and similar HTTP APIs (Meilisearch, Typesense, Elasticsearch, Qdrant, PostgREST, CouchDB); reads page by page with a resumable cursor
 - [Typesense](https://marcomq.github.io/mq-bridge/connectors/typesense.html): `typesense://host/collection` output; Postgres CDC to Typesense with backfill and deletes
 - [Qdrant](https://marcomq.github.io/mq-bridge/connectors/qdrant.html): `qdrant://host/collection` output and full-scan input; Postgres CDC to Qdrant with embeddings
-- [OpenAI-compatible APIs](https://marcomq.github.io/mq-bridge/connectors/openai.html): `openai_chat` (one chat completion per message) and `openai_embeddings` (one request per batch) for OpenAI, Ollama, vLLM and similar
+- [OpenAI-compatible APIs](https://marcomq.github.io/mq-bridge/connectors/openai.html): `openai_chat` (one chat completion per message) and `openai_embeddings` (one request per batch) for OpenAI, Ollama, vLLM and similar; `llm_hosted_agent` (OpenAI Responses or Anthropic Messages, the provider calls tools and MCP servers); `llm_agent` (mq-bridge runs the tool loop: endpoints and MCP servers over HTTP or stdio as tools; OpenAI, Anthropic, Chat Completions)
 - [Elasticsearch](https://marcomq.github.io/mq-bridge/connectors/elasticsearch.html): `elasticsearch://host/index` output over the `_bulk` API; Postgres CDC to Elasticsearch
 - [PostgREST and Supabase](https://marcomq.github.io/mq-bridge/connectors/postgrest.html): upserts and deletes through the REST data API
 - [Object storage](https://marcomq.github.io/mq-bridge/connectors/object-store.html): S3, GCS, Azure Blob, local directory; Parquet, JSONL, CSV
@@ -91,6 +109,7 @@ Problem-first guides, each with a runnable example in `examples/` that CI execut
 - [Middleware and structural endpoints](https://marcomq.github.io/mq-bridge/engine/reference.html): every middleware and structural endpoint, with fields, defaults and YAML
 - [Delivery guarantees](https://marcomq.github.io/mq-bridge/engine/delivery.html): at-least-once, idempotent sinks, replay-safe files
 - [Configuration grammar](https://marcomq.github.io/mq-bridge/engine/configuration.html)
+- [Handlers and streaming in Rust](https://marcomq.github.io/mq-bridge/engine/handlers.html): blocking handlers, `emit`, cancelling, the `mqb.stream.*` token format, `StreamCaller`
 - [CLI commands](https://marcomq.github.io/mq-bridge/reference/cli.html)
 - [Language bindings API](https://marcomq.github.io/mq-bridge/reference/bindings.html): Python and Node.js
 

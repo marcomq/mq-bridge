@@ -42,6 +42,11 @@ IbmMqConfig = dict
 IbmTlsConfig = dict
 KafkaConfig = dict
 LimiterMiddleware = dict
+LlmAgentConfig = dict
+LlmHostedAgentConfig = dict
+LlmHostedMcpServer = dict
+LlmMcpServer = dict
+LlmTool = dict
 LookupEntry = dict
 LookupMiddleware = dict
 MeilisearchConfig = dict
@@ -100,6 +105,9 @@ HttpBulkStream = str
 HttpServerProtocol = str
 IdHash = str
 InputErrorPolicy = str
+LlmAnswer = str
+LlmHostedProvider = str
+LlmProvider = str
 MappingRule = str
 MongoConsume = str
 MongoDbFormat = str
@@ -191,6 +199,14 @@ __all__ = [
     "InputErrorPolicy",
     "KafkaConfig",
     "LimiterMiddleware",
+    "LlmAgentConfig",
+    "LlmAnswer",
+    "LlmHostedAgentConfig",
+    "LlmHostedMcpServer",
+    "LlmHostedProvider",
+    "LlmMcpServer",
+    "LlmProvider",
+    "LlmTool",
     "LookupEntry",
     "LookupMiddleware",
     "MappingRule",

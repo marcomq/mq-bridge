@@ -1,8 +1,8 @@
+use crate::CanonicalMessage;
 use crate::models::{WeakJoinAck, WeakJoinMiddleware, WeakJoinTimeout};
 use crate::traits::{
     BatchCommitFunc, BoxFuture, ConsumerError, MessageConsumer, MessageDisposition, ReceivedBatch,
 };
-use crate::CanonicalMessage;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::any::Any;
@@ -516,8 +516,8 @@ impl MessageConsumer for WeakJoinConsumer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::endpoints::memory::MemoryConsumer;
     use crate::CanonicalMessage;
+    use crate::endpoints::memory::MemoryConsumer;
     use serde_json::json;
 
     #[tokio::test]

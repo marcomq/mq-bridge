@@ -1,5 +1,5 @@
-use crate::traits::{Handled, HandlerError};
 use crate::CanonicalMessage;
+use crate::traits::{Handled, HandlerError};
 
 /// Internal trait to convert success types into the [Handled] enum.
 pub trait IntoHandled {

@@ -2,12 +2,12 @@
 //  © Copyright 2026, by Marco Mengelkoch
 //  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 
+use crate::CanonicalMessage;
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::traits::{
     BatchCommitFunc, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
     ReceivedBatch,
 };
-use crate::CanonicalMessage;
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use std::any::Any;
@@ -265,9 +265,9 @@ impl EventStore {
     pub(crate) fn with_async_drop_callback(
         mut self,
         callback: impl Fn(Vec<StoredEvent>) -> futures::future::BoxFuture<'static, ()>
-            + Send
-            + Sync
-            + 'static,
+        + Send
+        + Sync
+        + 'static,
     ) -> Self {
         self.on_drop_async = Some(Box::new(callback));
         self
@@ -637,7 +637,7 @@ mod tests {
     use super::*;
     use crate::errors::ConsumerError;
     use std::sync::Arc;
-    use tokio::time::{sleep, Duration};
+    use tokio::time::{Duration, sleep};
 
     #[tokio::test]
     async fn test_event_store_lifecycle() {
@@ -665,11 +665,13 @@ mod tests {
     async fn the_highest_offset_has_nothing_after_it() {
         let store = EventStore::new(RetentionPolicy::default());
         store.append(CanonicalMessage::from("msg1")).await;
-        assert!(store
-            .get_events_since(u64::MAX, 10)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            store
+                .get_events_since(u64::MAX, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

@@ -1,3 +1,0 @@
-# Keeps the 2021 formatting after the move to edition 2024. Remove it and run
-# `cargo fmt --all` to adopt the 2024 style (about 200 files change).
-style_edition = "2021"

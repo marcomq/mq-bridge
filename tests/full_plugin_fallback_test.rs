@@ -11,10 +11,10 @@
 
 use std::time::Duration;
 
+use mq_bridge::CanonicalMessage;
 use mq_bridge::endpoints::{create_consumer_from_route, create_publisher_from_route};
 use mq_bridge::models::Endpoint;
 use mq_bridge::plugin::test_support::{payload_texts, receive_one_batch};
-use mq_bridge::CanonicalMessage;
 use serde_json::json;
 
 #[tokio::test(flavor = "multi_thread")]

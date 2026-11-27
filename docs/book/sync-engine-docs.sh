@@ -30,6 +30,7 @@ FILES=(
   "ARCHITECTURE.md:architecture.md"
   "DELIVERY.md:delivery.md"
   "EXTENDING.md:extending.md"
+  "HANDLERS.md:handlers.md"
   "PLUGINS.md:plugins.md"
 )
 

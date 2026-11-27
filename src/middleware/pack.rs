@@ -22,13 +22,13 @@
 //! idempotent sink) if duplicates matter.
 
 use super::buffer::rebuild_error;
+use crate::CanonicalMessage;
 use crate::models::{InputErrorPolicy, PackMiddleware, UnpackMiddleware};
-use crate::support::pack::{unpack, Packer, UnpackLimits};
+use crate::support::pack::{Packer, UnpackLimits, unpack};
 use crate::traits::{
     BatchCommitFunc, BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
     MessagePublisher, PublisherError, ReceivedBatch, SentBatch,
 };
-use crate::CanonicalMessage;
 use anyhow::anyhow;
 use async_trait::async_trait;
 use std::any::Any;
@@ -536,9 +536,11 @@ mod tests {
 
     #[tokio::test]
     async fn an_empty_publish_batch_sends_nothing() {
-        assert!(publish(&pack_config(10, 1 << 20), Vec::new())
-            .await
-            .is_empty());
+        assert!(
+            publish(&pack_config(10, 1 << 20), Vec::new())
+                .await
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -682,12 +684,14 @@ mod tests {
     #[tokio::test]
     async fn an_idle_source_still_reports_empty() {
         let (mut consumer, _) = unpacker(Vec::new());
-        assert!(consumer
-            .receive_batch(100)
-            .await
-            .unwrap()
-            .messages
-            .is_empty());
+        assert!(
+            consumer
+                .receive_batch(100)
+                .await
+                .unwrap()
+                .messages
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -855,12 +859,14 @@ mod tests {
         let packer = Packer::new(PackFormat::Mqb, true);
         let wire = vec![CanonicalMessage::new_bytes(packer.pack(&[]), None)];
         let (mut consumer, commits) = unpacker(wire);
-        assert!(consumer
-            .receive_batch(100)
-            .await
-            .unwrap()
-            .messages
-            .is_empty());
+        assert!(
+            consumer
+                .receive_batch(100)
+                .await
+                .unwrap()
+                .messages
+                .is_empty()
+        );
         assert_eq!(
             commits.lock().unwrap().len(),
             1,

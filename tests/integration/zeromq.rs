@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use mq_bridge::test_utils::{
-    run_performance_pipeline_test, setup_logging, PERF_TEST_MESSAGE_COUNT,
+    PERF_TEST_MESSAGE_COUNT, run_performance_pipeline_test, setup_logging,
 };
 
 const CONFIG_YAML: &str = r#"

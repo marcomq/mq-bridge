@@ -15,7 +15,7 @@ use std::ffi::c_void;
 use anyhow::anyhow;
 use tokio::sync::oneshot;
 
-use crate::support::plugin_abi::{MqbCompletion, MqbStatus, MQB_OK};
+use crate::support::plugin_abi::{MQB_OK, MqbCompletion, MqbStatus};
 
 /// The out-parameters of one call, plus whatever must outlive it.
 pub(super) trait Slots: Send + 'static {
@@ -126,8 +126,8 @@ pub(super) fn call<S: Slots>(
 mod tests {
     use super::*;
     use crate::support::plugin_abi::MQB_ERR_RETRYABLE;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     struct Probe {
         value: u32,

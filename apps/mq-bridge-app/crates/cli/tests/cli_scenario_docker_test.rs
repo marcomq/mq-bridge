@@ -13,7 +13,17 @@
 //! ```
 //!
 //! `MQB_TEST_BIN=/path/to/mq-bridge-app` runs the scenarios against another build,
-//! such as an older release.
+//! such as an older release. `MQB_TEST_PLUGIN` loads plugin libraries, and
+//! `MQB_TEST_TARGET` describes an endpoint for the `external` module:
+//!
+//! ```text
+//! MQB_TEST_PLUGIN=/path/to/libmy_plugin.dylib MQB_TEST_BACKEND=external \
+//! MQB_TEST_TARGET='{"compose": "/abs/compose.yml", "service": "broker",
+//!   "input": {"custom": {"name": "my", "config": {"queue": "$ID"}}},
+//!   "output": {"custom": {"name": "my", "config": {"queue": "$ID"}}},
+//!   "input_uri": "my://localhost?queue=$ID", "output_uri": "my://localhost?queue=$ID"}' \
+//! cargo test -p mq-bridge-app --test cli_scenario_docker_test -- --ignored --test-threads=1 external
+//! ```
 #![cfg(unix)]
 
 use std::collections::BTreeSet;
@@ -257,6 +267,8 @@ struct Broker {
     backend: &'static str,
     /// The compose file, when it is not named after `backend`.
     stack: Option<&'static str>,
+    /// A compose file outside the engine's integration stacks.
+    compose_file: Option<fn() -> PathBuf>,
     service: &'static str,
     concurrency: u32,
     batch_size: u32,
@@ -276,6 +288,7 @@ struct Broker {
 const BASE: Broker = Broker {
     backend: "",
     stack: None,
+    compose_file: None,
     service: "",
     concurrency: 4,
     batch_size: 1024,
@@ -346,7 +359,10 @@ fn scenario(b: &Broker, restart: bool) {
     let run = Headless::start(&dir, &routes(b, &q, &input, &output, rate));
     let mut allowed = 0;
     if restart {
-        let compose = Compose::new(b.stack.unwrap_or(b.backend));
+        let compose = b.compose_file.map_or_else(
+            || Compose::new(b.stack.unwrap_or(b.backend)),
+            |file| Compose(file()),
+        );
         wait_for_rows(&output, 1, Duration::from_secs(60), &run);
         // Counted before the stop: Kafka's graceful shutdown keeps serving for seconds.
         let at_stop = distinct(&complete_rows(&output)).len();
@@ -391,6 +407,97 @@ macro_rules! scenarios {
             scenario(&broker, true);
         }
     };
+}
+
+// =================================================================== External
+
+/// Any endpoint the binary can load, described by `MQB_TEST_TARGET`.
+mod external {
+    use super::*;
+    use serde_json::Value;
+    use std::sync::OnceLock;
+
+    struct Target {
+        compose: PathBuf,
+        service: String,
+        input: String,
+        output: String,
+        input_uri: Option<String>,
+        output_uri: Option<String>,
+    }
+
+    fn text(json: &Value, key: &str) -> String {
+        json[key]
+            .as_str()
+            .unwrap_or_else(|| panic!("MQB_TEST_TARGET needs the string `{key}`"))
+            .to_string()
+    }
+
+    /// `{"nats": {...}}` as the `nats: {...}` line a route's block mapping takes.
+    fn route_entry(json: &Value, key: &str) -> String {
+        let entry = json[key].as_object().filter(|object| object.len() == 1);
+        let (kind, config) = entry
+            .and_then(|object| object.iter().next())
+            .unwrap_or_else(|| panic!("MQB_TEST_TARGET `{key}` needs exactly one endpoint key"));
+        format!("{kind}: {config}")
+    }
+
+    fn parse(raw: &str) -> Target {
+        let json: Value = serde_json::from_str(raw).expect("MQB_TEST_TARGET is not JSON");
+        let compose = PathBuf::from(text(&json, "compose"));
+        assert!(
+            compose.is_absolute(),
+            "MQB_TEST_TARGET `compose` must be an absolute path"
+        );
+        let uri = |key: &str| json[key].as_str().map(str::to_string);
+        Target {
+            compose,
+            service: text(&json, "service"),
+            input: route_entry(&json, "input"),
+            output: route_entry(&json, "output"),
+            input_uri: uri("input_uri"),
+            output_uri: uri("output_uri"),
+        }
+    }
+
+    fn target() -> Option<&'static Target> {
+        static TARGET: OnceLock<Option<Target>> = OnceLock::new();
+        TARGET
+            .get_or_init(|| std::env::var("MQB_TEST_TARGET").ok().map(|raw| parse(&raw)))
+            .as_ref()
+    }
+
+    fn leg(q: &str, pick: fn(&Target) -> &str) -> String {
+        target().map_or_else(String::new, |t| pick(t).replace("$ID", q))
+    }
+
+    scenarios!(Broker {
+        backend: "external",
+        compose_file: Some(|| target().expect("MQB_TEST_TARGET").compose.clone()),
+        service: target().map_or("", |t| t.service.as_str()),
+        sink: |q| leg(q, |t| &t.output),
+        source: |q| leg(q, |t| &t.input),
+        available: || target().is_some(),
+        restart_rate: Some(10_000),
+        ..BASE
+    });
+
+    #[test]
+    #[ignore = "requires MQB_TEST_TARGET"]
+    fn external_copy_killed_mid_run_resumes_without_loss() {
+        backend!("external");
+        let uris = target().and_then(|t| Some((t.output_uri.as_ref()?, t.input_uri.as_ref()?)));
+        let Some((sink, source)) = uris else {
+            eprintln!("skipping external kill -9: MQB_TEST_TARGET has no input_uri and output_uri");
+            return;
+        };
+        let q = unique("cli_scn_external");
+        killed_mid_run_resumes(
+            "external kill -9 resume",
+            &sink.replace("$ID", &q),
+            &source.replace("$ID", &q),
+        );
+    }
 }
 
 // ====================================================================== Kafka

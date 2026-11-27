@@ -3,7 +3,7 @@ name = "mq-bridge"
 version.workspace = true
 edition = "2024"
 authors = ["Marco Mengelkoch"]
-rust-version = "1.89"  # With the checked-in lock; `aws`, `sqlx`, `postgres-cdc` and `full` need 1.94.1. CI job `msrv` tests both.
+rust-version = "1.91"  # With the checked-in lock; `aws`, `sqlx`, `postgres-cdc` and `full` need 1.94.1. CI job `msrv` tests both.
 description = "Embeddable async ETL and messaging library: brokers (Kafka, NATS, AMQP, MQTT), databases incl. Postgres/MongoDB CDC, Parquet on S3/GCS/Azure object storage, HTTP/gRPC."
 repository = "https://github.com/marcomq/mq-bridge"
 homepage = "https://marcomq.github.io/mq-bridge/"
@@ -62,7 +62,7 @@ exit = "warn"
 collapsible_if = "allow"
 
 [workspace.package]
-version = "1.6.2"
+version = "1.7.0"
 
 [workspace.dependencies]
 anyhow = "1.0"
@@ -115,10 +115,10 @@ serde = { workspace = true, features = ["derive"] }
 anyhow.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "net", "signal"] }
 # Note on MSRV for optional features:
-# The crate MSRV is 1.89 (uuid 1.27, in every build); these features need more:
+# The crate MSRV is 1.91 (amq-protocol 10.8+ with `amqp`); these features need more:
 # - "aws" (aws-sdk-*) requires Rust 1.94.1, and so does "full".
 # - "sqlx" and "postgres-cdc" (sqlx 0.9) require Rust 1.94.
-# - "zeromq-omq" (omq 0.33) requires Rust 1.93.
+# - "zeromq-omq" (omq-tokio 0.39) requires Rust 1.93.
 async-trait.workspace = true
 serde_json.workspace = true
 thiserror = "2.0"
@@ -160,7 +160,7 @@ metrics = { version = "0.24", optional = true }
 # Tracing: API only; the host installs the SDK and exporter.
 opentelemetry = { version = "0.33", optional = true, default-features = false, features = ["trace"] }
 # Avro payloads with a Confluent Schema Registry.
-apache-avro = { version = "0.22", optional = true }
+apache-avro = { version = "0.23", optional = true }
 
 # Storage for Deduplication
 sled = { version = "0.34", optional = true }
@@ -177,6 +177,9 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"], optio
 
 # Kafka
 rdkafka = { version = "0.39", default-features = false, features = ["tokio"], optional = true }
+# Unused in code: lifts the bundled librdkafka to 2.16.0 for its security fixes while rdkafka
+# stays at 0.39 (0.40 changes the `mq_bridge::rdkafka` re-export; planned for 2.0).
+rdkafka-sys = { version = "4.11", default-features = false, optional = true }
 
 # AMQP (RabbitMQ).
 # Drop lapin's defaults so the crypto provider remains wired through
@@ -192,7 +195,7 @@ mongodb = { version = "3.8", optional = true, features = ["cert-key-password"] }
 object_store = { version = "0.14", optional = true, default-features = false, features = ["aws", "gcp", "azure", "http", "fs"] }
 
 # NATS
-async-nats = { version = "0.52", optional = true }
+async-nats = { version = "0.53", optional = true }
 
 # MQTT.
 # `use-rustls-no-provider` pulls tokio-rustls without a crypto provider (its
@@ -266,13 +269,16 @@ log = { version = "0.4", optional = true }
 # RowBinary/`Row`-derive only and cannot round-trip arbitrary dynamic JSON payloads.
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "query", "gzip"], optional = true }
 
+# MCP client of `llm_agent`: Streamable HTTP over our reqwest, and local servers over stdio.
+rmcp = { version = "3.12", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"], optional = true }
+
 # ZeroMQ
 zeromq = { version = "0.7", optional = true }
 
 # Default ZeroMQ backend (`backend: try_omq`). Faster than libzmq per its
 # benchmarks and adds CURVE/PLAIN security. Pure Rust without default
 # features; needs MSRV 1.93 / edition 2024.
-omq-tokio = { version = "0.36", optional = true }
+omq-tokio = { version = "0.39", optional = true }
 
 # Redis Streams. Pure-Rust client (no C bindings). TLS via rustls (ring), so
 # `rediss://` URLs work; webpki-roots ships the CA bundle so there's no system
@@ -322,7 +328,7 @@ middleware = ["metrics", "otel", "dedup", "compression", "encryption", "filter",
 # on ~19% of 17-significant-digit doubles (e.g. a Postgres `double precision` value
 # moved through a JSON payload). Enable if bit-exact float round-tripping matters.
 float-roundtrip = ["serde_json/float_roundtrip"]
-full-common = ["file", "dir-spool", "middleware", "yaml", "plugin", "mongodb", "kafka", "amqp", "nats", "mqtt", "http", "aws", "zeromq", "zeromq-omq", "redis-streams", "sled", "grpc", "sqlx", "clickhouse", "http-bulk", "websocket", "postgres-cdc", "object-store", "parquet", "avro", "rustls-aws-lc"]
+full-common = ["file", "dir-spool", "middleware", "yaml", "plugin", "mongodb", "kafka", "amqp", "nats", "mqtt", "http", "aws", "zeromq", "zeromq-omq", "redis-streams", "sled", "grpc", "sqlx", "clickhouse", "http-bulk", "llm-agent", "websocket", "postgres-cdc", "object-store", "parquet", "avro", "rustls-aws-lc"]
 
 # ibm-mq (dlopen) is safe to include: it needs no IBM SDK at build, and at
 # runtime the client is loaded lazily only when an ibm-mq endpoint is opened
@@ -341,7 +347,7 @@ link-dynamic = ["rdkafka?/dynamic-linking"]
 
 # The feature set for lint and doc builds. NOT `--all-features`: that turns on
 # `link-dynamic`, whose rdkafka-sys build script probes pkg-config for
-# librdkafka >= 2.12.1 and fails where none is installed. Everything else that
+# librdkafka >= 2.16.0 and fails where none is installed. Everything else that
 # gates code is here, `ibm-mq-static` included -- clippy never links, so it needs
 # no IBM SDK.
 lint-all = ["full", "test-utils", "schema", "plugin-sdk", "perf-diagnostics", "float-roundtrip", "ibm-mq-static", "rustls-ring"]
@@ -422,7 +428,7 @@ url = []
 file = ["dep:libc"]
 # `dir_spool` endpoint: crash-safe directory FIFO queue.
 dir-spool = ["dep:pidlock"]
-kafka = ["rdkafka", "rdkafka/libz-static"]
+kafka = ["rdkafka", "dep:rdkafka-sys", "rdkafka/libz-static"]
 # TLS and SASL for the bundled librdkafka, which has neither without OpenSSL. Compiles
 # OpenSSL from source: needs perl and make, and adds minutes to a clean build.
 kafka-ssl = ["kafka", "rdkafka/ssl-vendored"]
@@ -459,6 +465,8 @@ sqlx = ["sqlite", "sqlx/postgres", "sqlx/mysql"]
 clickhouse = ["dep:reqwest", "dep:flate2", "dep:lz4_flex", "dep:zstd", "rustls", "rustls-pemfile", "webpki-roots", "rustls-native-certs"]
 # Generic bulk document sink over HTTP (search engines and similar APIs).
 http-bulk = ["dep:reqwest", "dep:flate2", "dep:lz4_flex", "dep:zstd", "rustls", "rustls-pemfile", "webpki-roots", "rustls-native-certs"]
+# `llm_agent`: runs the tool loop itself; tools are endpoints or MCP servers.
+llm-agent = ["http-bulk", "dep:rmcp"]
 # Cloud object-store checkpoint backend (S3/GCS/Azure/R2). Talks cloud REST via reqwest.
 object-store = ["dep:object_store", "file"]
 # `format: parquet` on object_store. Column codecs reuse the `compression` crates.

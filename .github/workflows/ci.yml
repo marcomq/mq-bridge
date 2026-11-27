@@ -95,7 +95,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - toolchain: "1.89.0"
+          - toolchain: "1.91.0"
             features: "file,dir-spool,middleware,yaml,plugin,mongodb,kafka,amqp,nats,mqtt,http,zeromq,redis-streams,sled,grpc,clickhouse,http-bulk,websocket,object-store,parquet,avro,rustls-aws-lc,ibm-mq"
           - toolchain: "1.94.1"
             features: "full"

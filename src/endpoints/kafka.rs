@@ -1,22 +1,22 @@
+use crate::CanonicalMessage;
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::{CaRoots, KafkaConfig};
 use crate::traits::{
     BatchCommitFunc, BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
     MessagePublisher, PublisherError, Received, ReceivedBatch, Sent, SentBatch,
 };
-use crate::CanonicalMessage;
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use async_trait::async_trait;
 use futures::{FutureExt, StreamExt};
+use rdkafka::Offset;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::message::OwnedHeaders;
 use rdkafka::producer::{DeliveryFuture, FutureProducer, FutureRecord, Producer};
-use rdkafka::Offset;
 use rdkafka::{
+    ClientConfig, ClientContext, Message, TopicPartitionList,
     consumer::{BaseConsumer, CommitMode, Consumer, ConsumerContext, Rebalance},
     error::{KafkaError, RDKafkaErrorCode},
     message::Headers,
-    ClientConfig, ClientContext, Message, TopicPartitionList,
 };
 use std::future::Future;
 use std::sync::{Arc, Mutex};
@@ -148,7 +148,9 @@ impl KafkaPublisher {
             ));
         }
         if config.delayed_ack {
-            tracing::info!("Kafka 'delayed_ack' is enabled: sends return before broker confirmation; a route commits its source only once they are confirmed.");
+            tracing::info!(
+                "Kafka 'delayed_ack' is enabled: sends return before broker confirmation; a route commits its source only once they are confirmed."
+            );
         }
 
         let mut client_config = create_common_config(config)?;
@@ -3300,9 +3302,11 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("broker rejected"));
-        assert!(confirm_deliveries(pending.take(), Duration::from_secs(1))
-            .await
-            .is_ok());
+        assert!(
+            confirm_deliveries(pending.take(), Duration::from_secs(1))
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]

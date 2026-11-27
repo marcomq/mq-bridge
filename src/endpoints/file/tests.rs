@@ -158,11 +158,13 @@ async fn test_file_encrypted_compressed_roundtrip() {
     let raw = std::fs::read(&path).unwrap();
     assert!(!raw.is_empty());
     let mut decoded = Vec::new();
-    assert!(std::io::Read::read_to_end(
-        &mut flate2::read::MultiGzDecoder::new(&raw[..]),
-        &mut decoded
-    )
-    .is_err());
+    assert!(
+        std::io::Read::read_to_end(
+            &mut flate2::read::MultiGzDecoder::new(&raw[..]),
+            &mut decoded
+        )
+        .is_err()
+    );
     // The plaintext does not appear anywhere in the file.
     assert!(!raw.windows(5).any(|w| w == b"alice"));
 
@@ -523,10 +525,12 @@ async fn idempotent_file_sink_rejects_records_without_source_metadata() {
     };
     let publisher = FilePublisher::new(&config).await.unwrap();
 
-    assert!(publisher
-        .send_batch(vec![msg!(json!({ "id": 1 }))])
-        .await
-        .is_err());
+    assert!(
+        publisher
+            .send_batch(vec![msg!(json!({ "id": 1 }))])
+            .await
+            .is_err()
+    );
     assert!(std::fs::read_dir(output).unwrap().next().is_none());
 }
 
@@ -2239,8 +2243,8 @@ fn csv_dialect_of((separator, quote): (&str, &str), delimiter: &str) -> Option<s
     super::CsvDialect::from_config(&config, delimiter.as_bytes()).ok()
 }
 
-fn csv_payload(
-) -> impl proptest::strategy::Strategy<Value = std::collections::BTreeMap<String, String>> {
+fn csv_payload()
+-> impl proptest::strategy::Strategy<Value = std::collections::BTreeMap<String, String>> {
     proptest::collection::btree_map(csv_cell(), csv_cell(), 1..6)
 }
 
@@ -2481,10 +2485,12 @@ async fn test_file_sink_fsync_modes() {
             sink.flush().await.unwrap();
             assert!(!state.dirty.load(std::sync::atomic::Ordering::Acquire));
         }
-        assert!(tokio::fs::read_to_string(&path)
-            .await
-            .unwrap()
-            .starts_with("one\n"));
+        assert!(
+            tokio::fs::read_to_string(&path)
+                .await
+                .unwrap()
+                .starts_with("one\n")
+        );
     }
 
     let slow: FileConfig = serde_json::from_value(json!({
@@ -3338,8 +3344,8 @@ fn test_json_format_payload_is_copied_verbatim() {
 /// reason the source reads them out of it, so a round trip changes nothing.
 #[test]
 fn test_json_format_round_trip_preserves_payload_bytes() {
-    use crate::endpoints::file::{encode_record, parse_message};
     use crate::CanonicalMessage;
+    use crate::endpoints::file::{encode_record, parse_message};
 
     for payload in [
         r#"{"b":1,"a":2}"#,
@@ -4187,16 +4193,20 @@ async fn test_file_csv_rejects_ambiguous_dialects() {
         separator: Some("auto".to_string()),
         ..Default::default()
     };
-    assert!(FilePublisher::new(&csv_dialect_config(&path, auto))
-        .await
-        .is_err());
+    assert!(
+        FilePublisher::new(&csv_dialect_config(&path, auto))
+            .await
+            .is_err()
+    );
     let headless = CsvConfig {
         header: Some(false),
         ..Default::default()
     };
-    assert!(FileConsumer::new(&csv_dialect_config(&path, headless))
-        .await
-        .is_err());
+    assert!(
+        FileConsumer::new(&csv_dialect_config(&path, headless))
+            .await
+            .is_err()
+    );
     let config = FileConfig {
         delimiter: Some(",".to_string()),
         ..csv_dialect_config(&path, CsvConfig::default())

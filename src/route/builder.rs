@@ -8,6 +8,11 @@
 use super::*;
 
 impl Route {
+    /// A route that ends in `handler`. A message returned as `Handled::Publish` is discarded.
+    pub fn handled_by(input: Endpoint, handler: impl Handler + 'static) -> Self {
+        Self::new(input, Endpoint::null()).with_handler(handler)
+    }
+
     pub fn with_options(mut self, options: RouteOptions) -> Self {
         self.options = options;
         self

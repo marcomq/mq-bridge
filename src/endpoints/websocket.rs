@@ -3,6 +3,7 @@
 //  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
+use crate::CanonicalMessage;
 use crate::canonical_message::parse_message_id;
 use crate::models::{TlsConfig, WebSocketConfig};
 use crate::support::redact::url_password;
@@ -10,8 +11,7 @@ use crate::traits::{
     BoxFuture, CommitFunc, ConsumerError, Handled, Handler, MessageConsumer, MessageDisposition,
     MessagePublisher, PublisherError, ReceivedBatch, SentBatch,
 };
-use crate::CanonicalMessage;
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
 use std::any::Any;
@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
-use tokio::sync::{watch, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use tokio_rustls::TlsAcceptor;
 use tokio_websockets::{ClientBuilder, Connector, Message, ServerBuilder, WebSocketStream};
 use tracing::{debug, trace, warn};
@@ -378,7 +378,9 @@ fn tls_acceptor(config: &WebSocketConfig) -> anyhow::Result<Option<TlsAcceptor>>
         && authorization_value(config).is_some()
         && !crate::support::tls_check::is_loopback(&config.url)
     {
-        warn!("WebSocket listener has basic_auth but tls.required is off: clients send the credentials unencrypted.");
+        warn!(
+            "WebSocket listener has basic_auth but tls.required is off: clients send the credentials unencrypted."
+        );
     }
     if !config.tls.required {
         return Ok(None);
@@ -1324,10 +1326,12 @@ mod tests {
             .expect("a publisher with the credentials is let in");
         let received = consumer.receive_batch(1).await.unwrap();
         assert_eq!(&received.messages[0].payload[..], b"hello");
-        assert!(!received.messages[0]
-            .metadata_iter()
-            .map(|(key, _)| key)
-            .any(|key| key.contains("authorization")));
+        assert!(
+            !received.messages[0]
+                .metadata_iter()
+                .map(|(key, _)| key)
+                .any(|key| key.contains("authorization"))
+        );
     }
 
     #[tokio::test]

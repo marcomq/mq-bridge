@@ -24,6 +24,8 @@ key, and the part before the query string becomes `url` (or `path`):
 | `http-bulk:?config_file=<path>` | `http_bulk` | nested config from a file, or inline with `config=<YAML or JSON>` |
 | `typesense://host:8108/<collection>`, `elasticsearch://host:9200/<index>`, `qdrant://host:6333/<collection>` | the endpoint of that name | `+https` in the scheme for HTTPS; see [Typesense](./typesense.md), [Elasticsearch](./elasticsearch.md), [Qdrant](./qdrant.md) |
 | `openai://host?model=…&prompt=…`, `openai-embeddings://host?model=…&input=…` | `openai_chat` / `openai_embeddings` | `+https` in the scheme for HTTPS; see [OpenAI-compatible APIs](./openai.md) |
+| `llm-hosted-agent+https://host?provider=…&model=…&prompt=…` | `llm_hosted_agent` | the provider runs tools and MCP servers; see [`llm_hosted_agent`](./openai.md#llm_hosted_agent) |
+| `llm-agent+https://host?provider=…&model=…&prompt=…&mcp_servers=[…]` | `llm_agent` | mq-bridge runs the tool loop; see [`llm_agent`](./openai.md#llm_agent) |
 | `http://`, `https://` | `http` | unchanged |
 | `ws://`, `wss://` | `websocket` | unchanged |
 | `grpc://`, `grpcs://` | `grpc` | `url: "http://host:50051"` / `https://` |

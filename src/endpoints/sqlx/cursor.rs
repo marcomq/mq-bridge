@@ -326,8 +326,7 @@ const PG_COLUMN_TYPES_SQL: &str = "SELECT a.attname::text AS name, t.typname::te
 
 /// The bind is the schema part of a `db.table` name, empty for an unqualified one — in which
 /// case the connection's current database is used.
-pub(super) const MYSQL_COLUMN_TYPES_SQL: &str =
-    "SELECT COLUMN_NAME AS name, LOWER(DATA_TYPE) AS typname \
+pub(super) const MYSQL_COLUMN_TYPES_SQL: &str = "SELECT COLUMN_NAME AS name, LOWER(DATA_TYPE) AS typname \
      FROM information_schema.columns \
      WHERE table_schema = COALESCE(NULLIF(?, ''), DATABASE()) AND table_name = ? \
      ORDER BY ORDINAL_POSITION";
@@ -633,7 +632,7 @@ pub(crate) async fn build_sql_checkpoint_store(
     source_name: &str,
     cursor_id: &str,
 ) -> anyhow::Result<Arc<dyn crate::checkpoint::CheckpointStore>> {
-    sqlx::any::install_default_drivers();
+    super::install_sqlx_drivers();
     let pool = AnyPool::connect(url).await.with_context(|| {
         format!(
             "Failed to connect checkpoint store at '{}'",
@@ -755,7 +754,7 @@ pub(crate) async fn cursor_checkpoint(
     let (Some(cursor_id), Some(cursor_column)) = (&config.cursor_id, &config.cursor_column) else {
         return Ok(None);
     };
-    sqlx::any::install_default_drivers();
+    super::install_sqlx_drivers();
     open_cursor_checkpoint(config, cursor_id, cursor_column, None)
         .await
         .map(Some)
@@ -862,7 +861,7 @@ impl SqlxCursorReader {
         source_metadata: bool,
         no_resume: bool,
     ) -> anyhow::Result<Self> {
-        sqlx::any::install_default_drivers();
+        super::install_sqlx_drivers();
         if config.delete_after_read {
             return Err(anyhow!(
                 "SQLx `cursor_column` (non-destructive) and `delete_after_read` are mutually exclusive"
@@ -1117,11 +1116,11 @@ impl MessageConsumer for SqlxCursorReader {
                 Err(e) if is_permanent_decode_error(&e) => {
                     return Err(ConsumerError::Connection(anyhow::Error::new(
                         crate::errors::ProcessingError::NonRetryable(anyhow!(
-                        "SQLx cursor reader on table '{}' hit a column of a type the SQL `Any` \
+                            "SQLx cursor reader on table '{}' hit a column of a type the SQL `Any` \
                          driver cannot decode: {e}. This is permanent; expose the column as \
                          TEXT/BIGINT (e.g. via a view that CASTs it) and point the reader there.",
-                        self.table
-                    )),
+                            self.table
+                        )),
                     )));
                 }
                 Err(e) => return Err(classify_sql_consumer_error(e)),
@@ -1194,12 +1193,12 @@ impl MessageConsumer for SqlxCursorReader {
                     // beyond it. Advancing past the value would silently skip the remainder, so fail
                     // loudly instead of losing rows. Permanent: re-polling returns the same page forever.
                     return Err(ConsumerError::Permanent(anyhow!(
-                    "cursor_column '{}' has a group of equal values larger than batch_size ({}); \
+                        "cursor_column '{}' has a group of equal values larger than batch_size ({}); \
                      cannot page without skipping rows. Increase batch_size above the size of the \
                      largest equal-value group.",
-                    self.cursor_column,
-                    max_messages
-                )));
+                        self.cursor_column,
+                        max_messages
+                    )));
                 }
             }
             fetched.truncate(emit_len);

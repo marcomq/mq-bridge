@@ -9,8 +9,8 @@ use crate::models::{Endpoint, Middleware};
 use crate::traits::CustomMiddlewareFactory;
 use crate::traits::{MessageConsumer, MessagePublisher};
 use anyhow::Result;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 static REJECTED_INPUT_MESSAGES: AtomicU64 = AtomicU64::new(0);
 
@@ -60,7 +60,7 @@ mod metrics;
 mod otel;
 mod pack;
 mod parallel;
-pub(crate) use parallel::{send_failed, with_publish_turn, PublishTurn};
+pub(crate) use parallel::{PublishTurn, send_failed, with_publish_turn};
 mod random_panic;
 mod raw_json;
 mod retry;
@@ -205,8 +205,18 @@ async fn wrap_consumer(
             Middleware::Otel(_) => otel_consumer(consumer, route_name)?,
             // Output-only. Accepting them here used to warn and do nothing, which left a
             // route without the retries or dead-lettering its config asked for.
-            Middleware::Dlq(_) => return Err(misplaced(route_name, "`dlq` is an output-only middleware and does nothing on an input endpoint. Move it to the route's output endpoint.")),
-            Middleware::Retry(_) => return Err(misplaced(route_name, "`retry` is an output-only middleware and does nothing on an input endpoint. Move it to the route's output endpoint.")),
+            Middleware::Dlq(_) => {
+                return Err(misplaced(
+                    route_name,
+                    "`dlq` is an output-only middleware and does nothing on an input endpoint. Move it to the route's output endpoint.",
+                ));
+            }
+            Middleware::Retry(_) => {
+                return Err(misplaced(
+                    route_name,
+                    "`retry` is an output-only middleware and does nothing on an input endpoint. Move it to the route's output endpoint.",
+                ));
+            }
             Middleware::Delay(cfg) => Box::new(DelayConsumer::new(consumer, cfg)),
             Middleware::RandomPanic(cfg) => Box::new(RandomPanicConsumer::new(consumer, cfg)),
             Middleware::WeakJoin(cfg) => Box::new(WeakJoinConsumer::new(consumer, cfg)),
@@ -215,21 +225,43 @@ async fn wrap_consumer(
             Middleware::CookieJar(cfg) => Box::new(CookieJarConsumer::new(consumer, cfg)),
             Middleware::Transform(cfg) => Box::new(invalid(TransformConsumer::new(consumer, cfg))?),
             #[cfg(feature = "encryption")]
-            Middleware::Encryption(cfg) => Box::new(invalid(EncryptionConsumer::new(consumer, cfg))?),
+            Middleware::Encryption(cfg) => {
+                Box::new(invalid(EncryptionConsumer::new(consumer, cfg))?)
+            }
             #[cfg(feature = "compression")]
             Middleware::Compression(cfg) => Box::new(CompressionConsumer::new(consumer, cfg)),
             Middleware::Unpack(cfg) => Box::new(UnpackConsumer::new(consumer, cfg)),
             // Output-only: packing is what a transport writes, not what it reads.
-            Middleware::Pack(_) => return Err(misplaced(route_name, "`pack` is an output-only middleware. Put `pack` on the route's output endpoint and `unpack` on its input.")),
+            Middleware::Pack(_) => {
+                return Err(misplaced(
+                    route_name,
+                    "`pack` is an output-only middleware. Put `pack` on the route's output endpoint and `unpack` on its input.",
+                ));
+            }
             Middleware::Lookup(cfg) => {
                 Box::new(lookup::LookupConsumer::new(consumer, cfg, route_name).await?)
             }
             #[cfg(feature = "aggregate")]
-            Middleware::Aggregate(cfg) => Box::new(aggregate::AggregateConsumer::new(consumer, cfg, route_name).await?),
-            Middleware::Timeout(_) => return Err(misplaced(route_name, "`timeout` bounds sends and is output-only. Move it to the route's output endpoint.")),
+            Middleware::Aggregate(cfg) => {
+                Box::new(aggregate::AggregateConsumer::new(consumer, cfg, route_name).await?)
+            }
+            Middleware::Timeout(_) => {
+                return Err(misplaced(
+                    route_name,
+                    "`timeout` bounds sends and is output-only. Move it to the route's output endpoint.",
+                ));
+            }
             #[cfg(feature = "filter")]
-            Middleware::Filter(cfg) => Box::new(invalid(FilterConsumer::new(consumer, &cfg.expression))?.with_on_error(cfg.on_error)),
-            Middleware::Parallel(_) => return Err(misplaced(route_name, "an endpoint takes one `parallel` marker")),
+            Middleware::Filter(cfg) => Box::new(
+                invalid(FilterConsumer::new(consumer, &cfg.expression))?
+                    .with_on_error(cfg.on_error),
+            ),
+            Middleware::Parallel(_) => {
+                return Err(misplaced(
+                    route_name,
+                    "an endpoint takes one `parallel` marker",
+                ));
+            }
             Middleware::Custom { name, config } => {
                 let factory = custom_middleware_factory(name)?;
                 factory.apply_consumer(consumer, route_name, config).await?
@@ -240,7 +272,8 @@ async fn wrap_consumer(
                     "[middleware:{}] Unsupported consumer middleware: {}",
                     route_name,
                     missing_feature(other)
-                )).into())
+                ))
+                .into());
             }
         };
     }
@@ -311,14 +344,21 @@ async fn wrap_publisher(
         publisher = match middleware {
             // Consumer-only: identity is derived where a record enters the pipeline, so that
             // everything downstream — dedup, sink keying, handlers — sees the same value.
-            Middleware::Id(_) => return Err(misplaced(route_name, "`id` is a consumer-only middleware and does nothing on an output endpoint. Move it to the route's input endpoint.")),
+            Middleware::Id(_) => {
+                return Err(misplaced(
+                    route_name,
+                    "`id` is a consumer-only middleware and does nothing on an output endpoint. Move it to the route's input endpoint.",
+                ));
+            }
             Middleware::Dlq(cfg) => Box::new(DlqPublisher::new(publisher, cfg, route_name).await?),
             Middleware::Otel(_) => otel_publisher(publisher, route_name)?,
             Middleware::Lookup(cfg) => {
                 Box::new(lookup::LookupPublisher::new(publisher, cfg, route_name).await?)
             }
             #[cfg(feature = "aggregate")]
-            Middleware::Aggregate(cfg) => Box::new(aggregate::AggregatePublisher::new(publisher, cfg, route_name).await?),
+            Middleware::Aggregate(cfg) => {
+                Box::new(aggregate::AggregatePublisher::new(publisher, cfg, route_name).await?)
+            }
             #[cfg(feature = "metrics")]
             Middleware::Metrics(cfg) => {
                 Box::new(MetricsPublisher::new(publisher, cfg, route_name, "output"))
@@ -326,7 +366,12 @@ async fn wrap_publisher(
             // Consumer-only. Accepting it here used to warn and do nothing, which silently
             // left a route un-deduplicated; `weak_join` already fails fast the same way.
             #[cfg(feature = "dedup")]
-            Middleware::Deduplication(_) => return Err(misplaced(route_name, "deduplication is a consumer-only middleware and does nothing on an output endpoint. Move it to the route's input endpoint.")),
+            Middleware::Deduplication(_) => {
+                return Err(misplaced(
+                    route_name,
+                    "deduplication is a consumer-only middleware and does nothing on an output endpoint. Move it to the route's input endpoint.",
+                ));
+            }
             Middleware::Retry(cfg) => Box::new(RetryPublisher::new(publisher, cfg.clone())),
             Middleware::Delay(cfg) => Box::new(DelayPublisher::new(publisher, cfg)),
             Middleware::Timeout(cfg) => Box::new(TimeoutPublisher::new(publisher, cfg)),
@@ -334,17 +379,34 @@ async fn wrap_publisher(
             Middleware::Limiter(cfg) => Box::new(invalid(LimiterPublisher::new(publisher, cfg))?),
             Middleware::Buffer(cfg) => Box::new(invalid(BufferPublisher::new(publisher, cfg))?),
             Middleware::CookieJar(cfg) => Box::new(CookieJarPublisher::new(publisher, cfg)),
-            Middleware::Transform(cfg) => Box::new(invalid(TransformPublisher::new(publisher, cfg))?),
+            Middleware::Transform(cfg) => {
+                Box::new(invalid(TransformPublisher::new(publisher, cfg))?)
+            }
             #[cfg(feature = "encryption")]
-            Middleware::Encryption(cfg) => Box::new(invalid(EncryptionPublisher::new(publisher, cfg))?),
+            Middleware::Encryption(cfg) => {
+                Box::new(invalid(EncryptionPublisher::new(publisher, cfg))?)
+            }
             #[cfg(feature = "compression")]
             Middleware::Compression(cfg) => Box::new(CompressionPublisher::new(publisher, cfg)),
             Middleware::Pack(cfg) => Box::new(invalid(PackPublisher::new(publisher, cfg))?),
             // Input-only: unpacking is what a transport reads, not what it writes.
-            Middleware::Unpack(_) => return Err(misplaced(route_name, "`unpack` is an input-only middleware. Put `unpack` on the route's input endpoint and `pack` on its output.")),
+            Middleware::Unpack(_) => {
+                return Err(misplaced(
+                    route_name,
+                    "`unpack` is an input-only middleware. Put `unpack` on the route's input endpoint and `pack` on its output.",
+                ));
+            }
             #[cfg(feature = "filter")]
-            Middleware::Filter(cfg) => Box::new(invalid(FilterPublisher::new(publisher, &cfg.expression))?.with_on_error(cfg.on_error)),
-            Middleware::Parallel(_) => return Err(misplaced(route_name, "an endpoint takes one `parallel` marker.")),
+            Middleware::Filter(cfg) => Box::new(
+                invalid(FilterPublisher::new(publisher, &cfg.expression))?
+                    .with_on_error(cfg.on_error),
+            ),
+            Middleware::Parallel(_) => {
+                return Err(misplaced(
+                    route_name,
+                    "an endpoint takes one `parallel` marker.",
+                ));
+            }
             Middleware::Custom { name, config } => {
                 let factory = custom_middleware_factory(name)?;
                 factory
@@ -357,7 +419,8 @@ async fn wrap_publisher(
                     "[middleware:{}] Unsupported publisher middleware: {}",
                     route_name,
                     missing_feature(other)
-                )).into())
+                ))
+                .into());
             }
         };
     }

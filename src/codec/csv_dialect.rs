@@ -219,7 +219,9 @@ fn guess_separator(record: &[u8], quote: Option<u8>) -> u8 {
 /// One ASCII byte: a character, a name (`tab`, `space`, …) or hex like `0x1f`.
 fn parse_byte(value: &str, what: &str) -> anyhow::Result<u8> {
     let invalid = || {
-        anyhow!("csv: `{what}` must be one ASCII character, `tab`, `space` or hex like 0x1f, got '{value}'")
+        anyhow!(
+            "csv: `{what}` must be one ASCII character, `tab`, `space` or hex like 0x1f, got '{value}'"
+        )
     };
     let byte = match value {
         "tab" | "\\t" => b'\t',
@@ -300,10 +302,12 @@ mod tests {
         let headless = CsvDialect::from_config(&csv, b"\n").unwrap();
         assert!(headless.check_source().is_err());
         csv.columns = vec!["id".to_string()];
-        assert!(CsvDialect::from_config(&csv, b"\n")
-            .unwrap()
-            .check_source()
-            .is_ok());
+        assert!(
+            CsvDialect::from_config(&csv, b"\n")
+                .unwrap()
+                .check_source()
+                .is_ok()
+        );
         csv.on_mismatch = CsvMismatch::Fail;
         let strict = CsvDialect::from_config(&csv, b"\n").unwrap();
         assert!(strict.check_source().is_err());

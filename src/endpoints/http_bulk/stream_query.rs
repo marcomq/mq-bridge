@@ -9,20 +9,24 @@
 //! the whole text is the message's response, so the input is committed after it.
 //! A message on `cancel_from` with a request's `correlation_id` stops that request.
 
-use super::publisher::{scalar_text, Failure};
+use super::publisher::{Failure, scalar_text};
 use super::query::Query;
-use super::{quoted, Connection};
+use super::{Connection, quoted};
+use crate::CanonicalMessage;
 use crate::models::{HttpBulkConfig, HttpBulkQuery};
+use crate::stream_caller::{
+    CORRELATION_ID, STREAM_ATTEMPT, STREAM_END, STREAM_INDEX, STREAM_REQUEST, STREAM_STATUS,
+    STREAM_STOP_REASON,
+};
 use crate::support::http_status;
 use crate::support::sse::{find_sse_event_end, parse_sse_event};
 use crate::traits::{
     ConsumerError, MessageConsumer, MessageDisposition, MessagePublisher, PublisherError, SentBatch,
 };
-use crate::CanonicalMessage;
-use anyhow::{anyhow, bail, Context};
+use anyhow::{Context, anyhow, bail};
 use async_trait::async_trait;
 use futures::{FutureExt, StreamExt};
-use reqwest::header::{HeaderValue, ACCEPT, CONTENT_TYPE};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderValue};
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::panic::AssertUnwindSafe;
@@ -202,7 +206,8 @@ impl StreamQueryPublisher {
             .get_metadata("correlation_id")
             .map(str::to_owned)
             .unwrap_or_else(|| format!("{:032x}", message.message_id));
-        let mut tokens = Tokens::new(correlation_id);
+        let request = message.get_metadata(STREAM_REQUEST).map(str::to_owned);
+        let mut tokens = Tokens::new(correlation_id, request);
         let attempt = AssertUnwindSafe(self.attempt(message, &mut tokens))
             .catch_unwind()
             .await;
@@ -226,7 +231,7 @@ impl StreamQueryPublisher {
         let entry = self
             .running
             .as_ref()
-            .map(|r| r.enter(&tokens.correlation_id));
+            .map(|r| r.enter(&tokens.correlation_id, tokens.request.as_deref()));
         let cancelled = entry.as_ref().map(|e| e.token.clone()).unwrap_or_default();
         let label = &self.label;
         let started = match self.start(message, &cancelled).await {
@@ -252,6 +257,25 @@ impl StreamQueryPublisher {
         };
         drop(entry);
 
+        // Before the last token, so that it never reports `complete` for a refused answer.
+        let parsed = match end {
+            End::Complete if self.parse_value => match serde_json::from_str::<Value>(&text) {
+                Ok(value) => Some(value),
+                Err(error) => {
+                    let reason = format!("the answer is not JSON ({error}): {}", quoted(&text));
+                    let refused = End::Refused(reason.clone());
+                    tokens
+                        .send(
+                            &*self.stream_to,
+                            &reason,
+                            Some((&refused, stop_reason.as_deref())),
+                        )
+                        .await;
+                    return Err(PublisherError::NonRetryable(anyhow!(reason)));
+                }
+            },
+            _ => None,
+        };
         let content = match &end {
             End::Failed(reason) | End::Refused(reason) => reason.as_str(),
             _ => "",
@@ -267,31 +291,23 @@ impl StreamQueryPublisher {
             End::Failed(reason) => {
                 return Err(PublisherError::Retryable(anyhow!(
                     "{label} stream broke off: {reason}"
-                )))
+                )));
             }
             End::Refused(reason) => {
                 return Err(PublisherError::NonRetryable(anyhow!(
                     "{label} refused the request: {reason}"
-                )))
+                )));
             }
             _ => {}
         }
-        let value = match end {
-            End::Complete if self.parse_value => serde_json::from_str(&text).map_err(|error| {
-                PublisherError::NonRetryable(anyhow!(
-                    "the answer is not JSON ({error}): {}",
-                    quoted(&text)
-                ))
-            })?,
-            _ => Value::String(text),
-        };
+        let value = parsed.unwrap_or(Value::String(text));
         let mut response =
             CanonicalMessage::new(value.to_string().into_bytes(), Some(message.message_id))
-                .with_metadata_kv("correlation_id", tokens.correlation_id.clone())
-                .with_metadata_kv("mqb.stream.attempt", tokens.attempt.clone())
-                .with_metadata_kv("mqb.stream.status", end.status());
+                .with_metadata_kv(CORRELATION_ID, tokens.correlation_id.clone())
+                .with_metadata_kv(STREAM_ATTEMPT, tokens.attempt.clone())
+                .with_metadata_kv(STREAM_STATUS, end.status());
         if let Some(reason) = stop_reason {
-            response = response.with_metadata_kv("mqb.stream.stop_reason", reason);
+            response = response.with_metadata_kv(STREAM_STOP_REASON, reason);
         }
         Ok(response)
     }
@@ -416,6 +432,8 @@ fn is_event_stream(response: &reqwest::Response) -> bool {
 /// The token messages of one attempt.
 struct Tokens {
     correlation_id: String,
+    /// Set by a `StreamCaller`, to tell this request from another with the same id.
+    request: Option<String>,
     attempt: String,
     index: usize,
     /// Cleared after the last token or the first failed send; later tokens are not sent.
@@ -423,9 +441,10 @@ struct Tokens {
 }
 
 impl Tokens {
-    fn new(correlation_id: String) -> Self {
+    fn new(correlation_id: String, request: Option<String>) -> Self {
         Self {
             correlation_id,
+            request,
             attempt: fast_uuid_v7::format_uuid(fast_uuid_v7::gen_id()).to_string(),
             index: 0,
             healthy: true,
@@ -442,14 +461,17 @@ impl Tokens {
             return;
         }
         let mut message = CanonicalMessage::from_vec(content.as_bytes())
-            .with_metadata_kv("correlation_id", self.correlation_id.clone())
-            .with_metadata_kv("mqb.stream.attempt", self.attempt.clone())
-            .with_metadata_kv("mqb.stream.index", self.index.to_string())
-            .with_metadata_kv("mqb.stream.end", end.is_some().to_string());
+            .with_metadata_kv(CORRELATION_ID, self.correlation_id.clone())
+            .with_metadata_kv(STREAM_ATTEMPT, self.attempt.clone())
+            .with_metadata_kv(STREAM_INDEX, self.index.to_string())
+            .with_metadata_kv(STREAM_END, end.is_some().to_string());
+        if let Some(request) = &self.request {
+            message = message.with_metadata_kv(STREAM_REQUEST, request.clone());
+        }
         if let Some((end, finish_reason)) = end {
-            message = message.with_metadata_kv("mqb.stream.status", end.status());
+            message = message.with_metadata_kv(STREAM_STATUS, end.status());
             if let Some(reason) = finish_reason {
-                message = message.with_metadata_kv("mqb.stream.stop_reason", reason);
+                message = message.with_metadata_kv(STREAM_STOP_REASON, reason);
             }
         }
         self.index += 1;
@@ -470,60 +492,77 @@ struct Running(Mutex<Requests>);
 
 #[derive(Default)]
 struct Requests {
-    /// Each with its cancel token and how many requests share the id.
-    running: HashMap<String, (CancellationToken, usize)>,
+    /// Each with its cancel token and how many requests share the key.
+    running: HashMap<RequestKey, (CancellationToken, usize)>,
     /// Oldest first; a request that starts within `EARLY_CANCEL_TTL` is cancelled at once.
-    early: VecDeque<(String, Instant)>,
+    early: VecDeque<(String, Option<String>, Instant)>,
 }
 
+/// The correlation id, and the `StreamCaller` request under it if there is one.
+type RequestKey = (String, Option<String>);
+
 impl Running {
-    fn enter(self: &Arc<Self>, id: &str) -> Entry {
+    fn enter(self: &Arc<Self>, id: &str, request: Option<&str>) -> Entry {
         let mut requests = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        let early = requests.take_early(id);
-        let (token, count) = requests.running.entry(id.to_string()).or_default();
+        let early = requests.take_early(id, request);
+        let key = (id.to_string(), request.map(str::to_owned));
+        let (token, count) = requests.running.entry(key.clone()).or_default();
         if early {
             token.cancel();
         }
         *count += 1;
         Entry {
             running: self.clone(),
-            id: id.to_string(),
+            key,
             token: token.clone(),
         }
     }
 
-    fn cancel(&self, id: &str) {
+    /// With `request`, stops only that request; without, every request under `id`.
+    fn cancel(&self, id: &str, request: Option<&str>) {
         let mut requests = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        match requests.running.get(id) {
-            Some((token, _)) => token.cancel(),
-            None => requests.remember(id),
+        let mut found = false;
+        for ((running, key), (token, _)) in &requests.running {
+            if running == id && request.is_none_or(|request| key.as_deref() == Some(request)) {
+                token.cancel();
+                found = true;
+            }
+        }
+        if !found {
+            requests.remember(id, request);
         }
     }
 }
 
 impl Requests {
-    fn remember(&mut self, id: &str) {
+    fn remember(&mut self, id: &str, request: Option<&str>) {
         let now = Instant::now();
-        while self.early.front().is_some_and(|(_, at)| {
+        while self.early.front().is_some_and(|(_, _, at)| {
             now.duration_since(*at) > EARLY_CANCEL_TTL || self.early.len() >= EARLY_CANCELS
         }) {
             self.early.pop_front();
         }
-        self.early.push_back((id.to_string(), now));
+        self.early
+            .push_back((id.to_string(), request.map(str::to_owned), now));
     }
 
-    fn take_early(&mut self, id: &str) -> bool {
-        let Some(at) = self.early.iter().position(|(early, _)| early == id) else {
+    fn take_early(&mut self, id: &str, request: Option<&str>) -> bool {
+        let Some(at) = self.early.iter().position(|(early, scope, _)| {
+            early == id
+                && scope
+                    .as_ref()
+                    .is_none_or(|scope| Some(scope.as_str()) == request)
+        }) else {
             return false;
         };
-        let (_, when) = self.early.remove(at).expect("found");
+        let (_, _, when) = self.early.remove(at).expect("found");
         when.elapsed() <= EARLY_CANCEL_TTL
     }
 }
 
 struct Entry {
     running: Arc<Running>,
-    id: String,
+    key: RequestKey,
     token: CancellationToken,
 }
 
@@ -534,10 +573,10 @@ impl Drop for Entry {
             .0
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if let Some((_, count)) = requests.running.get_mut(&self.id) {
+        if let Some((_, count)) = requests.running.get_mut(&self.key) {
             *count -= 1;
             if *count == 0 {
-                requests.running.remove(&self.id);
+                requests.running.remove(&self.key);
             }
         }
     }
@@ -560,8 +599,8 @@ async fn listen(mut consumer: Box<dyn MessageConsumer>, running: std::sync::Weak
         };
         for message in &batch.messages {
             match message.get_metadata("correlation_id") {
-                Some(id) => running.cancel(id),
-                None => running.cancel(message.get_payload_str().trim()),
+                Some(id) => running.cancel(id, message.get_metadata(STREAM_REQUEST)),
+                None => running.cancel(message.get_payload_str().trim(), None),
             }
         }
         let acks = vec![MessageDisposition::Ack; batch.messages.len()];
@@ -607,12 +646,12 @@ impl MessagePublisher for StreamQueryPublisher {
 
 #[cfg(test)]
 mod tests {
+    use crate::CanonicalMessage;
     use crate::endpoints::http_bulk::builtin_preset;
-    use crate::endpoints::memory::{get_or_create_channel, MemoryChannel};
+    use crate::endpoints::memory::{MemoryChannel, get_or_create_channel};
     use crate::models::MemoryConfig;
     use crate::traits::{MessagePublisher, PublisherError, Sent};
-    use crate::CanonicalMessage;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -822,6 +861,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_answer_that_is_not_json_ends_its_tokens_with_the_error() {
+        let chunks = vec![delta("not json"), finished()];
+        let (url, _server) = serve(SSE.into(), chunks, false).await;
+        let (publisher, tokens) = publisher(&url, json!({"json": true})).await;
+        let error = publisher
+            .send(CanonicalMessage::from("hi"))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("not JSON"), "{error}");
+        let tokens = tokens.drain_messages();
+        let last = tokens.last().unwrap();
+        assert_eq!(meta(last, "mqb.stream.status"), "error");
+        assert!(last.get_payload_str().contains("not JSON"));
+    }
+
+    #[tokio::test]
     async fn a_cancel_stops_a_silent_server_and_keeps_the_partial_answer() {
         let (url, _server) = serve(SSE.into(), vec![delta("par")], true).await;
         let cancel = topic();
@@ -880,13 +935,23 @@ mod tests {
     fn early_cancels_are_bounded_and_used_once() {
         let mut requests = super::Requests::default();
         for id in 0..super::EARLY_CANCELS + 5 {
-            requests.remember(&id.to_string());
+            requests.remember(&id.to_string(), None);
         }
         assert_eq!(requests.early.len(), super::EARLY_CANCELS);
-        assert!(!requests.take_early("0"));
+        assert!(!requests.take_early("0", None));
         let last = (super::EARLY_CANCELS + 4).to_string();
-        assert!(requests.take_early(&last));
-        assert!(!requests.take_early(&last));
+        assert!(requests.take_early(&last, None));
+        assert!(!requests.take_early(&last, None));
+    }
+
+    #[test]
+    fn a_dropped_replys_cancel_cannot_stop_a_later_request() {
+        let mut requests = super::Requests::default();
+        requests.remember("t", Some("old"));
+        assert!(!requests.take_early("t", Some("new")));
+        assert!(requests.take_early("t", Some("old")));
+        requests.remember("t", None);
+        assert!(requests.take_early("t", Some("new")));
     }
 
     #[tokio::test]

@@ -1,23 +1,23 @@
+use crate::APP_NAME;
+use crate::CanonicalMessage;
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::{AmqpConfig, CaRoots};
 use crate::traits::{
     BatchCommitFunc, BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
     MessagePublisher, PublisherError, ReceivedBatch, Sent, SentBatch,
 };
-use crate::CanonicalMessage;
-use crate::APP_NAME;
-use anyhow::{anyhow, bail, Context};
+use anyhow::{Context, anyhow, bail};
 use async_trait::async_trait;
-use futures::{future::join_all, FutureExt, StreamExt, TryStreamExt};
+use futures::{FutureExt, StreamExt, TryStreamExt, future::join_all};
 use lapin::tcp::{OwnedIdentity, OwnedTLSConfig};
 use lapin::{
+    Acker, BasicProperties, Channel, Confirmation, Connection, ConnectionProperties, Consumer,
+    DefaultConnectionBuilder, ExchangeKind,
     options::{
         BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, BasicQosOptions,
         ExchangeDeclareOptions, QueueBindOptions, QueueDeclareOptions,
     },
     types::{FieldTable, ShortString},
-    Acker, BasicProperties, Channel, Confirmation, Connection, ConnectionProperties, Consumer,
-    DefaultConnectionBuilder, ExchangeKind,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -856,7 +856,7 @@ impl MessageConsumer for AmqpConsumer {
                 Ok(None) => {
                     return Err(ConsumerError::Connection(anyhow::anyhow!(
                         "AMQP consumer stream ended unexpectedly"
-                    )))
+                    )));
                 }
                 Err(_) => {
                     // No message arrived within the poll window. If the connection
@@ -1014,7 +1014,9 @@ async fn handle_replies(
         let payload = match (disposition, reply_to) {
             (MessageDisposition::Reply(resp), Some(_)) => Some(resp.payload.clone()),
             (MessageDisposition::Reply(_), None) => {
-                tracing::warn!("MessageDisposition::Reply received but no reply_to address found in original message");
+                tracing::warn!(
+                    "MessageDisposition::Reply received but no reply_to address found in original message"
+                );
                 None
             }
             _ => None,

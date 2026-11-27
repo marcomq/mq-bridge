@@ -671,6 +671,28 @@ describe("custom form runtime", () => {
     expect((element.querySelector('input[type="text"]') as HTMLInputElement).value).toBe("mq.example.test");
   });
 
+  test("the tls section reads and writes tls.required without the form root key", async () => {
+    const forms = await loadCustomForm();
+    const renderTls = forms.customRenderers.tls.render as Function;
+    const store = createStore({ tls: { required: true } });
+
+    const element = renderTls(
+      { type: "object", title: "TLS", properties: { required: { type: "boolean", title: "Required" } } },
+      "",
+      "root.tls",
+      ["root", "tls"],
+      { store, layout: {} },
+    ) as HTMLElement;
+    document.body.appendChild(element);
+
+    const requiredCheckbox = findCheckboxByLabel(element, "TLS") as HTMLInputElement;
+    expect(requiredCheckbox.checked).toBe(true);
+
+    triggerCheckboxChange(requiredCheckbox, false);
+    expect(store.getPath(["tls", "required"])).toBe(false);
+    expect(store.getPath(["root"])).toBeUndefined();
+  });
+
   test("scalar endpoint renderers write string values back through the form store", async () => {
     const forms = await loadCustomForm();
     const renderStatic = forms.customRenderers.static.render as Function;

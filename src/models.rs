@@ -23,16 +23,16 @@ pub use defaults::DEFAULT_KAFKA_PARTITIONS;
 #[cfg(feature = "grpc")]
 pub(crate) use secrets::decode_secret_map_key;
 pub use secrets::{
-    check_config_secret_keys, check_secret_key_names, extract_config_secrets, SecretExtractor,
+    SecretExtractor, check_config_secret_keys, check_secret_key_names, extract_config_secrets,
 };
 
 use serde::{
-    de::{MapAccess, Visitor},
     Deserialize, Deserializer, Serialize,
+    de::{MapAccess, Visitor},
 };
 use std::{
     collections::HashMap,
-    sync::{atomic::AtomicUsize, Arc},
+    sync::{Arc, atomic::AtomicUsize},
 };
 
 use crate::traits::Handler;
@@ -370,6 +370,10 @@ pub enum EndpointType {
     Meilisearch(MeilisearchConfig),
     #[serde(rename = "openai_chat")]
     OpenAiChat(OpenAiChatConfig),
+    #[serde(rename = "llm_hosted_agent")]
+    LlmHostedAgent(LlmHostedAgentConfig),
+    #[serde(rename = "llm_agent")]
+    LlmAgent(LlmAgentConfig),
     #[serde(rename = "openai_embeddings")]
     OpenAiEmbeddings(OpenAiEmbeddingsConfig),
     Qdrant(QdrantConfig),
@@ -3722,6 +3726,8 @@ named_endpoints!(
     Elasticsearch(ElasticsearchConfig) => "elasticsearch",
     Meilisearch(MeilisearchConfig) => "meilisearch",
     OpenAiChat(OpenAiChatConfig) => "openai_chat",
+    LlmHostedAgent(LlmHostedAgentConfig) => "llm_hosted_agent",
+    LlmAgent(LlmAgentConfig) => "llm_agent",
     OpenAiEmbeddings(OpenAiEmbeddingsConfig) => "openai_embeddings",
     Qdrant(QdrantConfig) => "qdrant",
     Typesense(TypesenseConfig) => "typesense",
@@ -3961,6 +3967,204 @@ pub struct OpenAiChatConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub cancel_from: Option<Box<Endpoint>>,
+}
+
+/// The API an `llm_hosted_agent` talks to.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum LlmHostedProvider {
+    /// The OpenAI Responses API, also served by e.g. Azure, xAI and Groq.
+    #[default]
+    OpenAi,
+    /// The Anthropic Messages API with its MCP connector.
+    Anthropic,
+}
+
+/// What an `llm_hosted_agent` answers with.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum LlmAnswer {
+    /// The final text of the response.
+    #[default]
+    Text,
+    /// The whole response, with every tool call.
+    Full,
+}
+
+/// A remote MCP server the provider calls on the agent's behalf.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct LlmHostedMcpServer {
+    /// Label of the server, unique within the endpoint.
+    pub name: String,
+    /// URL the provider reaches the server at.
+    pub url: String,
+    /// Bearer token the provider sends to the server.
+    #[cfg_attr(feature = "schema", schemars(extend("format" = "password")))]
+    pub token: Option<String>,
+    /// Tools the model may call. Unset = all.
+    pub allowed_tools: Option<Vec<String>>,
+}
+
+/// The `llm_hosted_agent` endpoint: one request per message; the provider runs the tool and MCP loop.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(title = "Hosted LLM agent"))]
+#[serde(deny_unknown_fields)]
+pub struct LlmHostedAgentConfig {
+    /// `openai` (Responses API) or `anthropic` (Messages API).
+    #[serde(default)]
+    pub provider: LlmHostedProvider,
+    /// Base URL of the API. Defaults to `https://api.openai.com/v1` or `https://api.anthropic.com/v1`.
+    #[cfg_attr(feature = "schema", schemars(extend("x-mqb-uri" = "url")))]
+    pub url: Option<String>,
+    /// API key of the provider.
+    #[cfg_attr(feature = "schema", schemars(extend("format" = "password")))]
+    pub api_key: Option<String>,
+    /// Model name, e.g. `gpt-5-mini` or `claude-sonnet-5-5`.
+    pub model: String,
+    /// Template of the instructions (system prompt).
+    pub system: Option<String>,
+    /// Template of the user input, e.g. `Triage: ${payload:body}`.
+    #[serde(default)]
+    pub prompt: String,
+    /// The payload is the `input` (openai) or `messages` (anthropic) array itself.
+    #[serde(default)]
+    pub messages_from_payload: bool,
+    /// MCP servers the provider may call.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_servers: Vec<LlmHostedMcpServer>,
+    /// Most tokens of one answer. Anthropic requires it; defaults to 16000 there.
+    pub max_tokens: Option<u64>,
+    /// Parse the answer as JSON; openai is also asked for a JSON object.
+    #[serde(default)]
+    pub json: bool,
+    /// `text` (default) or `full`, the whole response with its tool calls.
+    #[serde(default)]
+    pub answer: LlmAnswer,
+    /// Further request fields, e.g. `{"temperature": 0}`; `tools` adds to the MCP ones; JSON in a URI.
+    pub options: Option<serde_json::Value>,
+    /// Requests in flight for one batch sent to this endpoint. Defaults to 8.
+    pub concurrency: Option<usize>,
+    /// Request timeout in milliseconds. Unset = 300 s without a response byte; `0` = none.
+    pub request_timeout_ms: Option<u64>,
+    /// TLS options as on `http_bulk` (`ca_file`, `cert_file`, `key_file`, `required`); JSON in a URI.
+    pub tls: Option<serde_json::Value>,
+    /// `oauth2` or `aws_sigv4` credentials, as on `http_bulk`; JSON in a URI.
+    pub auth: Option<serde_json::Value>,
+}
+
+/// The API an `llm_agent` talks to.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum LlmProvider {
+    /// The OpenAI Responses API.
+    #[default]
+    #[serde(rename = "openai")]
+    OpenAi,
+    /// The Anthropic Messages API.
+    #[serde(rename = "anthropic")]
+    Anthropic,
+    /// Chat Completions, e.g. Ollama, vLLM, Groq or the Gemini and Cohere compatibility APIs.
+    #[serde(rename = "openai_chat")]
+    OpenAiChat,
+}
+
+/// A tool the model may call: its arguments go to `endpoint`, whose answer is the result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct LlmTool {
+    /// Name the model calls the tool by.
+    pub name: String,
+    /// What the tool does, for the model.
+    pub description: Option<String>,
+    /// JSON schema of the arguments. Unset = any object.
+    pub schema: Option<serde_json::Value>,
+    /// Endpoint that gets the arguments as payload and answers, e.g. an `http` request.
+    pub endpoint: Box<Endpoint>,
+}
+
+/// An MCP server mq-bridge calls: `url` (Streamable HTTP) or `command` (a local process over stdio).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct LlmMcpServer {
+    /// Label of the server, used in messages.
+    pub name: String,
+    /// URL of a Streamable HTTP server.
+    pub url: Option<String>,
+    /// Bearer token sent to the `url` server.
+    #[cfg_attr(feature = "schema", schemars(extend("format" = "password")))]
+    pub token: Option<String>,
+    /// Program to start, e.g. `npx`; it speaks MCP on stdin and stdout.
+    pub command: Option<String>,
+    /// Arguments of `command`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    /// Environment variables set for `command`.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub env: HashMap<String, String>,
+    /// Tools the model may call. Unset = all.
+    pub allowed_tools: Option<Vec<String>>,
+}
+
+/// The `llm_agent` endpoint: mq-bridge runs the tool loop, calling endpoints and MCP servers itself.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(title = "LLM agent"))]
+#[serde(deny_unknown_fields)]
+pub struct LlmAgentConfig {
+    /// `openai` (Responses API), `anthropic` or `openai_chat` (Chat Completions).
+    #[serde(default)]
+    pub provider: LlmProvider,
+    /// Base URL of the API. Defaults to `https://api.openai.com/v1` or `https://api.anthropic.com/v1`.
+    #[cfg_attr(feature = "schema", schemars(extend("x-mqb-uri" = "url")))]
+    pub url: Option<String>,
+    /// API key of the provider.
+    #[cfg_attr(feature = "schema", schemars(extend("format" = "password")))]
+    pub api_key: Option<String>,
+    /// Model name, e.g. `gpt-5-mini` or `claude-sonnet-5-5`.
+    pub model: String,
+    /// Template of the instructions (system prompt).
+    pub system: Option<String>,
+    /// Template of the user input, e.g. `Triage: ${payload:body}`.
+    #[serde(default)]
+    pub prompt: String,
+    /// The payload is the provider's message array itself.
+    #[serde(default)]
+    pub messages_from_payload: bool,
+    /// Endpoints the model may call as tools.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<LlmTool>,
+    /// MCP servers whose tools the model may call.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_servers: Vec<LlmMcpServer>,
+    /// Most model calls for one message; then it fails. Defaults to 8.
+    pub max_rounds: Option<u32>,
+    /// Tool calls of one round run at once. Defaults to 4.
+    pub tool_concurrency: Option<usize>,
+    /// Most tokens of one answer, as `max_tokens` on chat completions. Anthropic requires it; defaults to 16000 there.
+    pub max_tokens: Option<u64>,
+    /// Parse the answer as JSON; openai and openai_chat are also asked for a JSON object.
+    #[serde(default)]
+    pub json: bool,
+    /// `text` (default) or `full`, the whole conversation.
+    #[serde(default)]
+    pub answer: LlmAnswer,
+    /// Further request fields, e.g. `{"temperature": 0}`; JSON in a URI.
+    pub options: Option<serde_json::Value>,
+    /// Messages of one batch handled at once. Defaults to 8.
+    pub concurrency: Option<usize>,
+    /// Request timeout in milliseconds. Unset = 300 s without a response byte; `0` = none.
+    pub request_timeout_ms: Option<u64>,
+    /// TLS options as on `http_bulk` (`ca_file`, `cert_file`, `key_file`, `required`); JSON in a URI.
+    pub tls: Option<serde_json::Value>,
+    /// `oauth2` or `aws_sigv4` credentials, as on `http_bulk`; JSON in a URI.
+    pub auth: Option<serde_json::Value>,
 }
 
 // --- Common Configuration ---

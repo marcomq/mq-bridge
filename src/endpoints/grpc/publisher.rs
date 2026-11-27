@@ -8,13 +8,13 @@
 use super::dynamic::reject_unsupported_call_metadata;
 use super::proto;
 use super::{bridge_to_canonical, canonical_to_bridge, configured_client, make_endpoint};
+use crate::CanonicalMessage;
 use crate::models::GrpcConfig;
 use crate::traits::{MessagePublisher, PublisherError, SentBatch};
-use crate::CanonicalMessage;
 use anyhow::Result;
 use async_trait::async_trait;
-use proto::bridge_client::BridgeClient;
 use proto::BridgeMessage;
+use proto::bridge_client::BridgeClient;
 use std::any::Any;
 use std::time::Duration;
 use tonic::transport::Channel;
@@ -160,15 +160,15 @@ impl MessagePublisher for GrpcPublisher {
                                     for orig in origs {
                                         failed.push((
                                             orig.clone(),
-                                            PublisherError::Retryable(anyhow::anyhow!(ack
-                                                .reason
-                                                .clone())),
+                                            PublisherError::Retryable(anyhow::anyhow!(
+                                                ack.reason.clone()
+                                            )),
                                         ));
                                     }
                                 } else {
-                                    return Err(PublisherError::Retryable(anyhow::anyhow!(ack
-                                        .reason
-                                        .clone())));
+                                    return Err(PublisherError::Retryable(anyhow::anyhow!(
+                                        ack.reason.clone()
+                                    )));
                                 }
                             }
                         }

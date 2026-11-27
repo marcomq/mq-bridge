@@ -1,6 +1,6 @@
 #![allow(unused_imports, dead_code)]
 
-use mongodb::bson::{doc, Document};
+use mongodb::bson::{Document, doc};
 use mq_bridge::endpoints::mongodb::MongoDbPublisher;
 use mq_bridge::models::{MongoDbConfig, MongoDbFormat};
 use mq_bridge::test_utils::{run_test_with_docker, setup_logging, should_run};

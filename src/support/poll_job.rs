@@ -8,7 +8,7 @@
 
 use std::future::Future;
 use std::time::Duration;
-use tokio::time::{timeout_at, Instant};
+use tokio::time::{Instant, timeout_at};
 
 /// How often a job is asked for its state, when a slow one is reported, and
 /// when it is given up.

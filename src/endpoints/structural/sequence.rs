@@ -25,8 +25,8 @@ use crate::traits::{
 use anyhow::anyhow;
 use async_trait::async_trait;
 use std::any::Any;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::Notify;
 use tracing::{info, warn};
@@ -436,10 +436,10 @@ impl MessageConsumer for SequenceConsumer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CanonicalMessage;
     use crate::endpoints::memory::MemoryPublisher;
     use crate::models::{EndpointType, MemoryConfig};
     use crate::traits::{MessageDisposition, MessagePublisher};
-    use crate::CanonicalMessage;
 
     fn memory_endpoint(topic: &str) -> Endpoint {
         Endpoint::new(EndpointType::Memory(MemoryConfig {

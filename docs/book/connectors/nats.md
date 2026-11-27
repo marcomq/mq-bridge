@@ -97,7 +97,9 @@ JetStream stores messages in a *stream*, and a stream lists the subjects it stor
 - **An output creates a missing stream** with the subjects `<stream>.>`: everything below the
   stream's name. With a wildcard in `subject` it takes that subject instead. The new stream
   keeps at most `stream_max_messages` messages (default 1,000,000) and `stream_max_bytes`
-  bytes (default 1 GiB).
+  bytes (default 1 GiB). A server with limited JetStream storage can refuse further streams
+  with error 10047 (`insufficient storage resources`) even if they hold little data. For many
+  small streams, set a lower `stream_max_bytes`.
 - **An input creates a missing stream** with exactly its `subject`.
 
 For streams with other settings (replicas, retention, a work-queue policy), create them with

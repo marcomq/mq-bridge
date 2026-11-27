@@ -6,7 +6,7 @@
 //! Frames JSON payloads as NDJSON request bodies, for sinks that take documents
 //! in bulk over HTTP and cap the size of one request.
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 
 /// Appends one JSON object as an NDJSON line. The bytes are copied through
 /// untouched unless the payload spans several lines, which would break the framing.

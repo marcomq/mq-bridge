@@ -267,7 +267,7 @@ pub(super) fn parse_template_with(
                         "Malformed token in insert_query: unknown prefix '{}' in '${{{}}}' (expected 'metadata' or 'payload')",
                         other,
                         inner
-                    ))
+                    ));
                 }
             };
             sources.push(source);
@@ -320,16 +320,9 @@ pub(super) fn resolve_source(
             Some(serde_json::Value::Number(n)) => {
                 if let Some(i) = n.as_i64() {
                     BindValue::Int(i)
+                } else if n.is_u64() {
+                    BindValue::Text(n.to_string())
                 } else if let Some(f) = n.as_f64() {
-                    if n.is_u64() {
-                        static WARNED: std::sync::atomic::AtomicBool =
-                            std::sync::atomic::AtomicBool::new(false);
-                        if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                            warn!(
-                                "`${{payload:{field}}}` is an integer above the BIGINT range and binds as a rounded float. Use `columns: auto` to keep it exact. Further occurrences are not logged."
-                            );
-                        }
-                    }
                     BindValue::Float(f)
                 } else {
                     BindValue::Null
@@ -399,6 +392,39 @@ pub(super) fn reject_embedded_nul(
     )))
 }
 
+/// The bind types of the statement cached for a query. The cache is keyed by SQL text, so a
+/// row with other types (a `u64` above `i64::MAX` binds as text) must not reuse or replace it.
+#[derive(Default)]
+pub(super) struct BindShape(std::sync::OnceLock<String>);
+
+impl BindShape {
+    fn is_cached_shape(&self, tags: &str) -> bool {
+        self.0.get_or_init(|| tags.to_owned()) == tags
+    }
+}
+
+/// [`bind_message_sources`], also telling whether the row may use the statement cache.
+pub(super) fn bind_cacheable<'q>(
+    mut query: AnyQuery<'q>,
+    msg: &CanonicalMessage,
+    sources: &[ColumnSource],
+    shape: &BindShape,
+) -> Result<(AnyQuery<'q>, bool), PublisherError> {
+    let payload_json = payload_fields(msg, sources);
+    let mut tags = String::with_capacity(sources.len());
+    for source in sources {
+        let value = resolve_source(msg, source, &payload_json);
+        reject_embedded_nul(source, &value)?;
+        // `bind_value` sends NULL as a text parameter.
+        tags.push(match &value {
+            BindValue::Null => 't',
+            value => bind_type_tag(value),
+        });
+        query = bind_value(query, value);
+    }
+    Ok((query, shape.is_cached_shape(&tags)))
+}
+
 /// Parse the payload fields once, then resolve+bind every column source for one row.
 pub(super) fn bind_message_sources<'q>(
     mut query: AnyQuery<'q>,
@@ -412,4 +438,26 @@ pub(super) fn bind_message_sources<'q>(
         query = bind_value(query, value);
     }
     Ok(query)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn payload_integer_above_i64_binds_as_exact_text() {
+        let msg = CanonicalMessage::new(br#"{"n":18446744073709551615}"#.to_vec(), None);
+        let json = serde_json::from_slice(&msg.payload).ok();
+        let value = resolve_source(&msg, &ColumnSource::Payload("n".into()), &json);
+        assert_eq!(value, BindValue::Text("18446744073709551615".into()));
+    }
+
+    #[test]
+    fn only_the_first_bind_shape_uses_the_statement_cache() {
+        let shape = BindShape::default();
+        assert!(shape.is_cached_shape("it"));
+        assert!(shape.is_cached_shape("it"));
+        assert!(!shape.is_cached_shape("tt"));
+        assert!(shape.is_cached_shape("it"));
+    }
 }

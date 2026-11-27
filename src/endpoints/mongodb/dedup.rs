@@ -35,7 +35,7 @@ impl MongoDedupStore {
         now: u64,
     ) -> Result<Vec<crate::middleware::deduplication::Reservation>, ConsumerError> {
         use crate::middleware::deduplication::{
-            hex_key, DedupStore, Reservation, PENDING_TTL_SECS,
+            DedupStore, PENDING_TTL_SECS, Reservation, hex_key,
         };
         use futures::TryStreamExt;
         let ids: Vec<String> = keys.iter().map(|k| hex_key(k)).collect();
@@ -104,7 +104,7 @@ impl crate::middleware::deduplication::DedupStore for MongoDedupStore {
         key: &[u8],
         now: u64,
     ) -> Result<crate::middleware::deduplication::Reservation, ConsumerError> {
-        use crate::middleware::deduplication::{hex_key, Reservation, PENDING_TTL_SECS};
+        use crate::middleware::deduplication::{PENDING_TTL_SECS, Reservation, hex_key};
         let id = hex_key(key);
         let now_ms = now as i64 * 1000;
         let now_date = mongodb::bson::DateTime::from_millis(now_ms);
@@ -272,7 +272,7 @@ impl crate::middleware::deduplication::DedupStore for MongoDedupStore {
     }
 
     async fn renew_many(&self, keys: &[Vec<u8>], now: u64) {
-        use crate::middleware::deduplication::{hex_key, PENDING_TTL_SECS};
+        use crate::middleware::deduplication::{PENDING_TTL_SECS, hex_key};
         let pending_date =
             mongodb::bson::DateTime::from_millis((now + PENDING_TTL_SECS) as i64 * 1000);
         for chunk in keys.chunks(crate::support::lookup_batch::MAX_KEYS_PER_QUERY) {

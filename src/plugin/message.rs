@@ -6,8 +6,8 @@
 //! Message conversion for both sides of the plugin ABI: the host uses it to
 //! publish and to read received batches, the SDK for the mirror image.
 
-use crate::support::plugin_abi::{MqbKeyValue, MqbMessage, MqbSlice};
 use crate::CanonicalMessage;
+use crate::support::plugin_abi::{MqbKeyValue, MqbMessage, MqbSlice};
 
 /// Copies borrowed ABI messages into owned ones.
 ///

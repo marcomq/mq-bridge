@@ -3,12 +3,12 @@
 //  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
+use crate::CanonicalMessage;
 use crate::canonical_message::MESSAGE_IDENTITY_KEY;
 use crate::support::interpolation::CompiledTemplate;
 use crate::traits::{
     BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, Received, ReceivedBatch,
 };
-use crate::CanonicalMessage;
 use anyhow::Context;
 use async_trait::async_trait;
 use std::any::Any;

@@ -134,6 +134,7 @@
 - [Custom endpoints](extending/custom-endpoints.md)
 - [Custom middleware](extending/custom-middleware.md)
 - [Writing endpoints & middleware (Rust/Python/Node)](engine/extending.md)
+- [Handlers and streaming in Rust](engine/handlers.md)
 - [Native plugins](extending/plugins.md)
 - [Writing a plugin](engine/plugins.md)
 - [Building from source](BUILD.md)

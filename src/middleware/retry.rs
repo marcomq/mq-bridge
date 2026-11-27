@@ -1,6 +1,6 @@
+use crate::CanonicalMessage;
 use crate::models::RetryMiddleware;
 use crate::traits::{MessagePublisher, PublisherError, Sent, SentBatch};
-use crate::CanonicalMessage;
 use anyhow::anyhow;
 use async_trait::async_trait;
 use std::any::Any;
@@ -171,7 +171,12 @@ impl MessagePublisher for RetryPublisher {
                             failed: all_failed,
                         });
                     }
-                    warn!("Batch send partially failed (attempt {}/{}): {} messages failed. Retrying...", attempt, self.config.max_attempts, retryable.len());
+                    warn!(
+                        "Batch send partially failed (attempt {}/{}): {} messages failed. Retrying...",
+                        attempt,
+                        self.config.max_attempts,
+                        retryable.len()
+                    );
                     current_messages = retryable.into_iter().map(|(msg, _)| msg).collect();
                     partial_progress = true;
                 }
@@ -239,8 +244,8 @@ impl MessagePublisher for RetryPublisher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::traits::MessagePublisher;
     use crate::CanonicalMessage;
+    use crate::traits::MessagePublisher;
     use anyhow::anyhow;
     use async_trait::async_trait;
     use std::any::Any;
@@ -342,9 +347,11 @@ mod tests {
         };
         let failed_ids: Vec<u128> = failed.iter().map(|(m, _)| m.message_id).collect();
         assert_eq!(failed_ids, vec![2, 3]);
-        assert!(failed
-            .iter()
-            .all(|(_, e)| e.to_string().contains("Retries exhausted")));
+        assert!(
+            failed
+                .iter()
+                .all(|(_, e)| e.to_string().contains("Retries exhausted"))
+        );
     }
 
     #[tokio::test]

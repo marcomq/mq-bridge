@@ -2,8 +2,8 @@
 
 use mq_bridge::models::{Endpoint, EndpointType, WebSocketConfig};
 use mq_bridge::test_utils::{
-    get_free_port, run_performance_pipeline_test, run_pipeline_test, setup_logging,
-    PERF_TEST_MESSAGE_COUNT,
+    PERF_TEST_MESSAGE_COUNT, get_free_port, run_performance_pipeline_test, run_pipeline_test,
+    setup_logging,
 };
 
 const CONFIG_YAML: &str = r#"

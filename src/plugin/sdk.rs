@@ -64,20 +64,20 @@ use futures::FutureExt;
 use tokio::sync::Mutex;
 
 use crate::errors::{ConsumerError, InvalidConfig, ProcessingError};
-use crate::plugin::message::{from_abi, read_message, AbiMessages};
+use crate::plugin::message::{AbiMessages, from_abi, read_message};
 use crate::support::plugin_abi::{
-    MqbBatchHandle, MqbBuffer, MqbCompletion, MqbConsumerHandle, MqbFactoryHandle, MqbFilterHandle,
-    MqbKeyValue, MqbMessage, MqbMiddlewareHandle, MqbPluginVTable, MqbPublisherHandle,
-    MqbResponsesHandle, MqbSlice, MqbStatus, MQB_CAP_CONSUMER, MQB_CAP_MIDDLEWARE,
-    MQB_CAP_MIDDLEWARE_WRAP, MQB_CAP_PUBLISHER, MQB_DELIVERY_ACKNOWLEDGES,
-    MQB_DELIVERY_IDEMPOTENT_SINK, MQB_DELIVERY_REPLAYS_FROM_START,
+    MQB_CAP_CONSUMER, MQB_CAP_MIDDLEWARE, MQB_CAP_MIDDLEWARE_WRAP, MQB_CAP_PUBLISHER,
+    MQB_DELIVERY_ACKNOWLEDGES, MQB_DELIVERY_IDEMPOTENT_SINK, MQB_DELIVERY_REPLAYS_FROM_START,
     MQB_DELIVERY_REQUIRES_FULL_REPLAY, MQB_DISCONNECT_COMPLETED, MQB_DISCONNECT_FAILED,
     MQB_DISPOSITION_NACK, MQB_DISPOSITION_REPLY, MQB_END_OF_STREAM, MQB_ERR_CONNECTION,
     MQB_ERR_INVALID_CONFIG, MQB_ERR_PANIC, MQB_ERR_PERMANENT, MQB_ERR_RETRYABLE,
     MQB_ERR_UNSUPPORTED, MQB_MESSAGE_DROPPED, MQB_MESSAGE_KEPT, MQB_MESSAGE_REPLACED,
     MQB_MIDDLEWARE_RECEIVE, MQB_MIDDLEWARE_SEND, MQB_OK, MQB_OUTCOME_OK, MQB_OUTCOME_PERMANENT,
     MQB_OUTCOME_RETRYABLE, MQB_PENDING, MQB_PLUGIN_ABI_MAJOR, MQB_PLUGIN_ABI_MINOR,
-    MQB_SCHEMA_ENDPOINT, MQB_SCHEMA_MIDDLEWARE,
+    MQB_SCHEMA_ENDPOINT, MQB_SCHEMA_MIDDLEWARE, MqbBatchHandle, MqbBuffer, MqbCompletion,
+    MqbConsumerHandle, MqbFactoryHandle, MqbFilterHandle, MqbKeyValue, MqbMessage,
+    MqbMiddlewareHandle, MqbPluginVTable, MqbPublisherHandle, MqbResponsesHandle, MqbSlice,
+    MqbStatus,
 };
 use crate::traits::{
     BatchCommitFunc, CustomEndpointFactory, CustomMiddlewareFactory, DisconnectOutcome,
@@ -2717,7 +2717,7 @@ mod tests {
 
     #[test]
     fn only_a_rejected_config_stops_a_route_at_creation() {
-        use anyhow::{anyhow, Context};
+        use anyhow::{Context, anyhow};
         let rejected = Err::<(), _>(anyhow::Error::new(InvalidConfig(anyhow!("no url"))))
             .context("route x")
             .unwrap_err();

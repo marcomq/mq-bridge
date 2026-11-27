@@ -2,12 +2,12 @@
 // (stable since 1.80) is always available here; the crate-wide 1.75 MSRV doesn't apply.
 #![allow(clippy::incompatible_msrv)]
 
-use super::{full, streamed, text_error_response, BoxBody, HttpReply, HttpSourceMessage};
-use crate::support::sse::{find_sse_event_end, parse_sse_event, ParsedSseEvent};
+use super::{BoxBody, HttpReply, HttpSourceMessage, full, streamed, text_error_response};
+use crate::CanonicalMessage;
+use crate::support::sse::{ParsedSseEvent, find_sse_event_end, parse_sse_event};
 use crate::traits::{
     BoxFuture, CommitFunc, MessageDisposition, MessagePublisher, PublisherError, Sent,
 };
-use crate::CanonicalMessage;
 use anyhow::anyhow;
 use bytes::Bytes;
 use http_body_util::BodyExt;
@@ -432,7 +432,7 @@ async fn send_stream_item(
                 Ok(Ok(Sent::Response(response))) => MessageDisposition::Reply(response),
                 Ok(Ok(Sent::Ack)) => MessageDisposition::Ack,
                 Ok(Err(error)) => {
-                    return Err(anyhow!("HTTP inline stream publisher failed: {}", error))
+                    return Err(anyhow!("HTTP inline stream publisher failed: {}", error));
                 }
                 Err(_) => return Err(anyhow!("HTTP inline stream publisher timed out")),
             };

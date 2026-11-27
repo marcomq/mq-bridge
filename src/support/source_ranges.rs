@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use tracing::warn;
 
 use crate::CanonicalMessage;
@@ -70,7 +70,9 @@ impl SourcePosition {
         if message.has_metadata(SQLX_TABLE_KEY) || message.has_metadata(SQLX_CURSOR_KEY) {
             return Self::from_sqlx_message(message);
         }
-        bail!("idempotent sink requires Kafka, postgres_cdc, mongodb, file or sqlx source-position metadata");
+        bail!(
+            "idempotent sink requires Kafka, postgres_cdc, mongodb, file or sqlx source-position metadata"
+        );
     }
 
     fn from_kafka_message(message: &CanonicalMessage) -> Result<Self> {

@@ -109,9 +109,9 @@ pub(crate) async fn create_publisher(cfg: &ZeroMqConfig) -> Result<Box<dyn Messa
 mod tests {
     //! The same scenarios against both backends.
     use super::*;
+    use crate::CanonicalMessage;
     use crate::models::{ZeroMqFormat, ZeroMqSocketType};
     use crate::traits::MessageDisposition;
-    use crate::CanonicalMessage;
     use std::time::Duration;
 
     fn free_url() -> String {
@@ -246,9 +246,11 @@ mod tests {
         let publisher = create_publisher(&config(&backend, &url, ZeroMqSocketType::Push, false))
             .await
             .unwrap();
-        assert!(arrives(publisher.as_ref(), &mut consumer, "one".into())
-            .await
-            .is_some());
+        assert!(
+            arrives(publisher.as_ref(), &mut consumer, "one".into())
+                .await
+                .is_some()
+        );
         drop(consumer);
         tokio::time::sleep(Duration::from_millis(500)).await;
         let mut consumer = None;
@@ -286,9 +288,11 @@ mod tests {
         let publisher = create_publisher(&config(&backend, &url, ZeroMqSocketType::Pub, false))
             .await
             .unwrap();
-        assert!(arrives(publisher.as_ref(), &mut consumer, "one".into())
-            .await
-            .is_some());
+        assert!(
+            arrives(publisher.as_ref(), &mut consumer, "one".into())
+                .await
+                .is_some()
+        );
         drop(consumer);
         tokio::time::sleep(Duration::from_millis(500)).await;
         let mut consumer = create_consumer(&sub).await.expect("could not bind again");
@@ -316,9 +320,11 @@ mod tests {
         let mut consumer = create_consumer(&config(&backend, &url, ZeroMqSocketType::Pull, false))
             .await
             .unwrap();
-        assert!(arrives(publisher.as_ref(), &mut consumer, "one".into())
-            .await
-            .is_some());
+        assert!(
+            arrives(publisher.as_ref(), &mut consumer, "one".into())
+                .await
+                .is_some()
+        );
         drop(publisher);
         tokio::time::sleep(Duration::from_millis(500)).await;
         let publisher = create_publisher(&push).await.expect("could not bind again");

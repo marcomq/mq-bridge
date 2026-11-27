@@ -943,9 +943,11 @@ mod tests {
     #[test]
     fn json_metadata_round_trip() {
         let mut msg = CanonicalMessage::new(b"hi".to_vec(), Some(1));
-        assert!(!String::from_utf8(serde_json::to_vec(&msg).unwrap())
-            .unwrap()
-            .contains("metadata"));
+        assert!(
+            !String::from_utf8(serde_json::to_vec(&msg).unwrap())
+                .unwrap()
+                .contains("metadata")
+        );
 
         msg.metadata.insert("kind".into(), "Order".into());
         let back: CanonicalMessage =

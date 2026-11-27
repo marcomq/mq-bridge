@@ -8,26 +8,26 @@
 //! `meta.retries > 3` needs no cast. `number()` stays accepted, and is still
 //! required where no literal names the intent.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::{anyhow, bail, Context};
+use anyhow::{Context, anyhow, bail};
 use async_trait::async_trait;
 use serde_json::{Map, Value};
 use zen_expression::compiler::{Compare, FetchFastTarget, Jump, Opcode};
 use zen_expression::expression::Standard;
 use zen_expression::functions::{FunctionKind, InternalFunction};
-use zen_expression::{compile_expression, Expression, Variable};
+use zen_expression::{Expression, Variable, compile_expression};
 
-use super::deferred_commit::{run_all, DeferredCommits};
-use super::raw_json::RawPairs;
 use super::MessageView;
+use super::deferred_commit::{DeferredCommits, run_all};
+use super::raw_json::RawPairs;
+use crate::CanonicalMessage;
 use crate::models::InputErrorPolicy;
 use crate::traits::{
     BatchCommitFunc, BoxFuture, CommitFunc, ConsumerError, EndpointStatus, MessageConsumer,
     MessageDisposition, MessagePublisher, PublisherError, Received, ReceivedBatch, Sent, SentBatch,
 };
-use crate::CanonicalMessage;
 
 /// The reserved context key under which message metadata is exposed.
 ///
@@ -236,7 +236,7 @@ impl FastTerm {
             Reading::Text(text) => text,
             Reading::Json(Value::String(text)) => text,
             Reading::Json(Value::Number(number)) => {
-                return Variable::from(&Value::Number(number.clone())).as_number()
+                return Variable::from(&Value::Number(number.clone())).as_number();
             }
             Reading::Absent | Reading::Json(_) => return None,
         };
@@ -690,10 +690,13 @@ fn parse_fast_term(opcodes: &[Opcode]) -> Option<FastTerm> {
 fn parse_fast_field(opcodes: &[Opcode]) -> Option<(Vec<String>, bool)> {
     match opcodes {
         [fetch] => Some((parse_fast_fetch(fetch)?, false)),
-        [fetch, Opcode::CallFunction {
-            kind: FunctionKind::Internal(InternalFunction::Number),
-            arg_count: 1,
-        }] => Some((parse_fast_fetch(fetch)?, true)),
+        [
+            fetch,
+            Opcode::CallFunction {
+                kind: FunctionKind::Internal(InternalFunction::Number),
+                arg_count: 1,
+            },
+        ] => Some((parse_fast_fetch(fetch)?, true)),
         _ => None,
     }
 }
@@ -1332,12 +1335,16 @@ mod tests {
     #[test]
     fn metadata_reads_through_the_meta_prefix() {
         let filter = CompiledFilter::new("meta.http_status_code == '200'").unwrap();
-        assert!(filter
-            .matches(&message("{}", &[("http_status_code", "200")]))
-            .unwrap());
-        assert!(!filter
-            .matches(&message("{}", &[("http_status_code", "404")]))
-            .unwrap());
+        assert!(
+            filter
+                .matches(&message("{}", &[("http_status_code", "200")]))
+                .unwrap()
+        );
+        assert!(
+            !filter
+                .matches(&message("{}", &[("http_status_code", "404")]))
+                .unwrap()
+        );
     }
 
     /// The whole point of splitting the paths: a metadata-only predicate is the
@@ -1353,12 +1360,16 @@ mod tests {
     #[test]
     fn payload_and_metadata_combine_in_one_expression() {
         let filter = CompiledFilter::new("x > 100 and meta.kind == 'order'").unwrap();
-        assert!(filter
-            .matches(&message(r#"{"x": 150}"#, &[("kind", "order")]))
-            .unwrap());
-        assert!(!filter
-            .matches(&message(r#"{"x": 150}"#, &[("kind", "refund")]))
-            .unwrap());
+        assert!(
+            filter
+                .matches(&message(r#"{"x": 150}"#, &[("kind", "order")]))
+                .unwrap()
+        );
+        assert!(
+            !filter
+                .matches(&message(r#"{"x": 150}"#, &[("kind", "refund")]))
+                .unwrap()
+        );
     }
 
     /// Metadata is always `String`, but the literal in `> 3` says the comparison
@@ -1377,36 +1388,48 @@ mod tests {
     #[test]
     fn a_text_typed_payload_field_compares_numerically() {
         let filter = CompiledFilter::new("amount > 100").unwrap();
-        assert!(filter
-            .matches(&message(r#"{"amount": "125"}"#, &[]))
-            .unwrap());
-        assert!(!filter
-            .matches(&message(r#"{"amount": "50"}"#, &[]))
-            .unwrap());
-        assert!(filter
-            .matches(&message(r#"{"amount": " 125.5 "}"#, &[]))
-            .unwrap());
+        assert!(
+            filter
+                .matches(&message(r#"{"amount": "125"}"#, &[]))
+                .unwrap()
+        );
+        assert!(
+            !filter
+                .matches(&message(r#"{"amount": "50"}"#, &[]))
+                .unwrap()
+        );
+        assert!(
+            filter
+                .matches(&message(r#"{"amount": " 125.5 "}"#, &[]))
+                .unwrap()
+        );
     }
 
     /// The implicit cast must be exact where `number()` is, not a float round-trip.
     #[test]
     fn the_implicit_cast_keeps_decimal_precision() {
         let filter = CompiledFilter::new("amount > 1.5").unwrap();
-        assert!(!filter
-            .matches(&message(r#"{"amount": "1.50"}"#, &[]))
-            .unwrap());
-        assert!(filter
-            .matches(&message(r#"{"amount": "1.51"}"#, &[]))
-            .unwrap());
+        assert!(
+            !filter
+                .matches(&message(r#"{"amount": "1.50"}"#, &[]))
+                .unwrap()
+        );
+        assert!(
+            filter
+                .matches(&message(r#"{"amount": "1.51"}"#, &[]))
+                .unwrap()
+        );
     }
 
     /// A string literal asks for a string. Coercing here would break leading zeros.
     #[test]
     fn a_string_comparison_is_never_coerced() {
         let filter = CompiledFilter::new("zip == '01234'").unwrap();
-        assert!(filter
-            .matches(&message(r#"{"zip": "01234"}"#, &[]))
-            .unwrap());
+        assert!(
+            filter
+                .matches(&message(r#"{"zip": "01234"}"#, &[]))
+                .unwrap()
+        );
         assert!(!filter.matches(&message(r#"{"zip": "1234"}"#, &[])).unwrap());
     }
 
@@ -1421,12 +1444,16 @@ mod tests {
 
         let payload = CompiledFilter::new("amount == 125").unwrap();
         assert!(payload.fast_predicate.is_some());
-        assert!(payload
-            .matches(&message(r#"{"amount": "125"}"#, &[]))
-            .unwrap());
-        assert!(!payload
-            .matches(&message(r#"{"amount": "126"}"#, &[]))
-            .unwrap());
+        assert!(
+            payload
+                .matches(&message(r#"{"amount": "125"}"#, &[]))
+                .unwrap()
+        );
+        assert!(
+            !payload
+                .matches(&message(r#"{"amount": "126"}"#, &[]))
+                .unwrap()
+        );
     }
 
     /// Text no cast can read still names the field and the cast, and a comparison
@@ -1483,12 +1510,16 @@ mod tests {
     #[test]
     fn a_nested_payload_path_resolves_instead_of_dropping_everything() {
         let filter = CompiledFilter::new("order.status == 'open'").unwrap();
-        assert!(filter
-            .matches(&message(r#"{"order": {"status": "open"}}"#, &[]))
-            .unwrap());
-        assert!(!filter
-            .matches(&message(r#"{"order": {"status": "shipped"}}"#, &[]))
-            .unwrap());
+        assert!(
+            filter
+                .matches(&message(r#"{"order": {"status": "open"}}"#, &[]))
+                .unwrap()
+        );
+        assert!(
+            !filter
+                .matches(&message(r#"{"order": {"status": "shipped"}}"#, &[]))
+                .unwrap()
+        );
     }
 
     #[test]
@@ -1520,9 +1551,11 @@ mod tests {
         assert_eq!(normalize_expression("a > 1 && b < 2"), "a > 1  and  b < 2");
         assert_eq!(normalize_expression("a || b"), "a  or  b");
         let filter = CompiledFilter::new("x > 100 && meta.kind == 'order'").unwrap();
-        assert!(filter
-            .matches(&message(r#"{"x": 150}"#, &[("kind", "order")]))
-            .unwrap());
+        assert!(
+            filter
+                .matches(&message(r#"{"x": 150}"#, &[("kind", "order")]))
+                .unwrap()
+        );
     }
 
     /// A `&&` inside a string literal is data, not an operator.
@@ -1530,9 +1563,11 @@ mod tests {
     fn boolean_normalization_leaves_string_literals_alone() {
         assert_eq!(normalize_expression("a == 'x && y'"), "a == 'x && y'");
         let filter = CompiledFilter::new("name == 'Ben && Jerry'").unwrap();
-        assert!(filter
-            .matches(&message(r#"{"name": "Ben && Jerry"}"#, &[]))
-            .unwrap());
+        assert!(
+            filter
+                .matches(&message(r#"{"name": "Ben && Jerry"}"#, &[]))
+                .unwrap()
+        );
     }
 
     #[test]
@@ -1778,12 +1813,16 @@ mod tests {
     fn message_metadata_shadows_a_payload_field_named_meta() {
         let filter = CompiledFilter::new("x > 1 and meta.kind == 'real'").unwrap();
         let payload = r#"{"x": 2, "meta": {"kind": "payload"}}"#;
-        assert!(filter
-            .matches(&message(payload, &[("kind", "real")]))
-            .unwrap());
-        assert!(!filter
-            .matches(&message(payload, &[("kind", "other")]))
-            .unwrap());
+        assert!(
+            filter
+                .matches(&message(payload, &[("kind", "real")]))
+                .unwrap()
+        );
+        assert!(
+            !filter
+                .matches(&message(payload, &[("kind", "other")]))
+                .unwrap()
+        );
     }
 
     /// A `switch` runs every `when` case against one context, so the nulls one
@@ -1815,18 +1854,22 @@ mod tests {
         let ignored = "x".repeat(10_000);
         let payload = format!(r#"{{"ignored":"{ignored}","wanted":"yes"}}"#);
 
-        assert!(filter
-            .matches_with_context(&message(&payload, &[]), &mut context)
-            .unwrap());
+        assert!(
+            filter
+                .matches_with_context(&message(&payload, &[]), &mut context)
+                .unwrap()
+        );
         assert!(!context.payload_loaded);
 
         let metadata = CompiledFilter::new("meta.kind == 'order'").unwrap();
-        assert!(metadata
-            .matches_with_context(
-                &message("not json", &[("kind", "order")]),
-                &mut FilterContext::new(),
-            )
-            .unwrap());
+        assert!(
+            metadata
+                .matches_with_context(
+                    &message("not json", &[("kind", "order")]),
+                    &mut FilterContext::new(),
+                )
+                .unwrap()
+        );
     }
 
     /// A source whose commits must stay in order, handing out one prepared batch per read

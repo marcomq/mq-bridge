@@ -3,10 +3,10 @@
 //  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
+use crate::CanonicalMessage;
 use crate::endpoints::create_publisher_from_route;
 use crate::models::DeadLetterQueueMiddleware;
 use crate::traits::{BoxFuture, MessagePublisher, PublisherError, Sent, SentBatch};
-use crate::CanonicalMessage;
 use async_trait::async_trait;
 use std::any::Any;
 use std::sync::Arc;
@@ -357,9 +357,9 @@ impl MessagePublisher for DlqPublisher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CanonicalMessage;
     use crate::middleware::retry::RetryPublisher;
     use crate::models::RetryMiddleware;
-    use crate::CanonicalMessage;
     use async_trait::async_trait;
     use std::sync::Mutex;
 

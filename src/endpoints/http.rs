@@ -4,8 +4,9 @@
 //  git clone https://github.com/marcomq/mq-bridge
 
 use self::stream::{
-    handle_streamable_request, stream_format, HttpReceiveStreamConfig, PublishResponseStreamError,
+    HttpReceiveStreamConfig, PublishResponseStreamError, handle_streamable_request, stream_format,
 };
+use crate::CanonicalMessage;
 use crate::canonical_message::parse_message_id;
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::{Compression, HttpConfig, HttpServerProtocol, TlsConfig};
@@ -14,18 +15,17 @@ use crate::traits::{
     BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, ReceivedBatch, Sent,
 };
 use crate::traits::{CommitFunc, MessageDisposition, PublisherError, SentBatch};
-use crate::CanonicalMessage;
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
-use base64::{engine::general_purpose, Engine as _};
+use base64::{Engine as _, engine::general_purpose};
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use http_body_util::StreamBody;
 use hyper::{
+    Request, Response, StatusCode,
     body::{Frame, Incoming},
     server::conn::{http1, http2},
-    Request, Response, StatusCode,
 };
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::connect::HttpConnector;
@@ -1480,7 +1480,7 @@ fn route_miss_response(
                 "No HTTP consumer registered for this path",
                 accepts_text,
                 None,
-            )
+            );
         }
         RouteMatchResult::Matched(_) => unreachable!("a matched route is not a miss"),
     };

@@ -55,6 +55,7 @@ jobs:
           # The extension depends on the engine, which lives in this workspace;
           # without this rust-cache purges it and every run recompiles it.
           cache-workspace-crates: true
+          save-if: ${{ github.event_name != 'pull_request' }}
 
       - name: Sync Python dev environment
         working-directory: bindings/python

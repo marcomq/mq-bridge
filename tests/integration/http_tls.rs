@@ -2,8 +2,8 @@
 
 use crate::integration::tls_helpers;
 use mq_bridge::models::Route;
-use mq_bridge::test_utils::{get_free_port, setup_logging};
 use mq_bridge::test_utils::{PERF_TEST_MESSAGE_COUNT, PERF_TEST_SINGLE_MESSAGE_COUNT};
+use mq_bridge::test_utils::{get_free_port, setup_logging};
 use serde_yaml_ng;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};

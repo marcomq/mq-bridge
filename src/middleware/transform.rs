@@ -41,12 +41,12 @@ mod error;
 mod path;
 mod schema;
 
+use crate::CanonicalMessage;
 use crate::models::TransformMiddleware;
 use crate::traits::{
     BoxFuture, ConsumerError, MessageConsumer, MessageDisposition, MessagePublisher,
     PublisherError, Received, ReceivedBatch, SentBatch,
 };
-use crate::CanonicalMessage;
 use async_trait::async_trait;
 use compiled::Compiled;
 use std::any::Any;

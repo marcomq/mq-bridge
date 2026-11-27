@@ -1,12 +1,12 @@
 //! The `otel` middleware end to end. Its own test binary: the tracer provider is global.
 #![cfg(feature = "otel")]
 
+use mq_bridge::CanonicalMessage;
 use mq_bridge::endpoints::memory::MemoryConsumer;
 use mq_bridge::endpoints::structural::null::NullPublisher;
 use mq_bridge::middleware::{apply_middlewares_to_consumer, apply_middlewares_to_publisher};
 use mq_bridge::models::{Endpoint, Middleware, OtelMiddleware};
 use mq_bridge::traits::MessageDisposition;
-use mq_bridge::CanonicalMessage;
 use opentelemetry::trace::SpanKind;
 use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
 

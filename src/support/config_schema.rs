@@ -79,7 +79,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use anyhow::{anyhow, bail, Context};
+use anyhow::{Context, anyhow, bail};
 use serde_json::{Map, Value};
 
 /// The per-property annotation naming a field's place in a URI.
@@ -164,6 +164,11 @@ impl FieldType {
         let expected = match self {
             Self::Text => return Ok(Value::String(raw.to_string())),
             Self::Array => {
+                // A list of objects cannot be spelled comma-separated; it comes as JSON.
+                if let Ok(Value::Array(list)) = serde_json::from_str(raw) {
+                    let items = list.into_iter().map(|entry| item.check(field, entry));
+                    return Ok(Value::Array(items.collect::<anyhow::Result<_>>()?));
+                }
                 let items = raw
                     .split(',')
                     .filter(|entry| !entry.is_empty())
@@ -191,6 +196,22 @@ impl FieldType {
             },
         };
         bail!("`{field}={raw}` is not {expected}, which is what this endpoint expects")
+    }
+
+    /// An element of a JSON list: kept if it has this type, coerced if it is text.
+    fn check(self, field: &str, entry: Value) -> anyhow::Result<Value> {
+        let fits = match self {
+            Self::Text => true,
+            Self::Integer => entry.is_i64() || entry.is_u64(),
+            Self::Number => entry.is_number(),
+            Self::Boolean => entry.is_boolean(),
+            Self::Array => entry.is_array(),
+        };
+        match entry {
+            entry if fits => Ok(entry),
+            Value::String(text) => self.coerce(field, &text, Self::Text),
+            entry => self.coerce(field, &entry.to_string(), Self::Text),
+        }
     }
 }
 
@@ -710,7 +731,7 @@ fn flatten_node<'a>(
                     .iter()
                     .map(|i| flatten_node(i, root, path, cyclic))
                     .collect(),
-            )
+            );
         }
         other => return other.clone(),
     };
@@ -831,6 +852,11 @@ mod tests {
         assert_eq!(config["acks"], json!(0.5));
         assert_eq!(config["brokers"], json!(["a", "b"]));
         assert_eq!(config["partitions"], json!([0, 1]));
+
+        let config = UriSchema::from_schema(&connect_schema())
+            .config_from_uri(r#"rp://host/t?brokers=[{"a":1},{"b":2}]"#)
+            .expect("map the uri");
+        assert_eq!(config["brokers"], json!([{"a": 1}, {"b": 2}]));
     }
 
     /// Passing `"abc"` on to a plugin expecting an integer buries the mistake in

@@ -3,14 +3,14 @@
 //  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
-use super::coerce::{render_path, Crumb, Ty};
-use super::error::{ErrorKind, TransformError};
-use super::path::{insert_at, paths_are_disjoint, CompiledPath, CompiledRule, Seg};
-use super::schema::CompiledSchema;
 use super::TRANSFORM_ERROR_KEY;
+use super::coerce::{Crumb, Ty, render_path};
+use super::error::{ErrorKind, TransformError};
+use super::path::{CompiledPath, CompiledRule, Seg, insert_at, paths_are_disjoint};
+use super::schema::CompiledSchema;
+use crate::CanonicalMessage;
 use crate::middleware::raw_json::RawPairs;
 use crate::models::{MappingRule, TransformErrorPolicy, TransformMiddleware};
-use crate::CanonicalMessage;
 use bytes::Bytes;
 use serde_json::value::RawValue;
 use serde_json::{Map, Value};
@@ -19,7 +19,7 @@ use zen_expression::compiler::{FetchFastTarget, Opcode};
 #[cfg(feature = "zen")]
 use zen_expression::variable::Symbol;
 #[cfg(feature = "zen")]
-use zen_expression::{compile_expression, expression::Standard, Expression, Variable};
+use zen_expression::{Expression, Variable, compile_expression, expression::Standard};
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Opts {
@@ -335,7 +335,7 @@ impl Compiled {
                                 "required source field is missing (mapped to '{}')",
                                 rule.out.join(".")
                             ),
-                        ))
+                        ));
                     }
                     // Optional and absent: leave the output key out entirely.
                     None => continue,

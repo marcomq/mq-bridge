@@ -10,22 +10,22 @@
 //! next-page URL from the response or its `Link` header.
 //! With `read.stream` one response stays open and is read event by event.
 
-use super::{quoted, Connection, JSON};
+use super::{Connection, JSON, quoted};
+use crate::CanonicalMessage;
 use crate::checkpoint::{self, CheckpointBackend, CheckpointStore, VersionedCheckpoint};
 use crate::endpoints::poll::PollBackoff;
 use crate::models::{HttpBulkConfig, HttpBulkPayloadEncoding, HttpBulkRead, HttpBulkStream};
 use crate::support::http_status;
 use crate::support::interpolation::pick_path;
-use crate::support::sse::{find_sse_event_end, parse_sse_event, ParsedSseEvent};
+use crate::support::sse::{ParsedSseEvent, find_sse_event_end, parse_sse_event};
 use crate::traits::{
     BatchCommitFunc, BoxFuture, ConsumerError, MessageConsumer, MessageDisposition, ReceivedBatch,
 };
-use crate::CanonicalMessage;
-use anyhow::{anyhow, bail, Context};
+use anyhow::{Context, anyhow, bail};
 use async_trait::async_trait;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use bytes::Bytes;
-use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::header::{ACCEPT, CONTENT_TYPE, LINK};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -201,7 +201,9 @@ impl HttpBulkConsumer {
             bail!("http_bulk read has no '{LIMIT}' in a stream: the server decides what it sends");
         }
         if read.stream.is_some() && !read.items.is_empty() {
-            bail!("http_bulk read.items does not apply to a stream: every event or line is a document");
+            bail!(
+                "http_bulk read.items does not apply to a stream: every event or line is a document"
+            );
         }
         let default_method = if read.body.is_some() { "POST" } else { "GET" };
         let method = read
@@ -217,7 +219,9 @@ impl HttpBulkConsumer {
             cursor.link,
         ];
         if sources.iter().filter(|set| **set).count() > 1 {
-            bail!("http_bulk read.cursor sets more than one of 'response', 'item', 'next_url', 'link'");
+            bail!(
+                "http_bulk read.cursor sets more than one of 'response', 'item', 'next_url', 'link'"
+            );
         }
         if by_url && read.stream.is_some() {
             bail!("http_bulk read.cursor.next_url and link do not apply to a stream");
@@ -396,7 +400,7 @@ impl HttpBulkConsumer {
                 Some(other) => {
                     return Err(ConsumerError::Permanent(anyhow!(
                         "http_bulk read.cursor.next_url '{pointer}' is not a URL: {other}"
-                    )))
+                    )));
                 }
             },
             None => link,
@@ -441,7 +445,7 @@ impl HttpBulkConsumer {
                     None => {
                         return Err(ConsumerError::Permanent(anyhow!(
                             "http_bulk read.cursor.response '{pointer}' is missing in the response; set read.cursor.end_when_missing if the API leaves it out on the last page"
-                        )))
+                        )));
                     }
                 };
                 Ok(after_page(items, next))
@@ -655,7 +659,9 @@ impl HttpBulkConsumer {
                         progress.position = boundary.clone().unwrap_or(before);
                         progress.rollbacks += 1;
                     } else if acked < positions.len() {
-                        warn!("A line of an http_bulk stream without read.cursor.item was not acknowledged and is not read again");
+                        warn!(
+                            "A line of an http_bulk stream without read.cursor.item was not acknowledged and is not read again"
+                        );
                     }
                 }
                 if let Some(boundary) = boundary {
@@ -766,7 +772,7 @@ fn item_position(
         _ => {
             return Err(ConsumerError::Permanent(anyhow!(
                 "http_bulk read.cursor.item '{pointer}' is missing in a document"
-            )))
+            )));
         }
     };
     let Some(add) = add else {
@@ -912,7 +918,7 @@ impl MessageConsumer for HttpBulkConsumer {
                     return Err(ConsumerError::Permanent(anyhow!(
                         "http_bulk read.items '{}' is not an array in the response",
                         self.items
-                    )))
+                    )));
                 }
             };
             let mut positions = self.positions(&response, items, cursor, next_url)?;
@@ -976,7 +982,7 @@ impl MessageConsumer for HttpBulkConsumer {
 #[cfg(all(test, feature = "plugin", feature = "test-utils"))]
 mod tests {
     use super::*;
-    use crate::plugin::test_support::{payload_texts, StubHttpServer, StubRequest};
+    use crate::plugin::test_support::{StubHttpServer, StubRequest, payload_texts};
     use serde_json::json;
 
     /// Picking a pointer's segments must read what `Value::pointer` reads on the parsed item.

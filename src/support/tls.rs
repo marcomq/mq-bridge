@@ -75,7 +75,9 @@ pub(crate) fn server_config(tls_config: &TlsConfig) -> anyhow::Result<rustls::Se
 pub(crate) fn client_config(tls_config: &TlsConfig) -> anyhow::Result<rustls::ClientConfig> {
     check_client_pair(tls_config)?;
     if tls_config.accept_invalid_certs {
-        warn!("TLS client is configured to accept invalid certificates. This is insecure and must not be used in production.");
+        warn!(
+            "TLS client is configured to accept invalid certificates. This is insecure and must not be used in production."
+        );
     }
     client_config_with(tls_config, crate::endpoints::get_crypto_provider()?)
 }
@@ -317,9 +319,11 @@ mod tests {
         }
         #[cfg(not(target_os = "android"))]
         match crate::support::os_roots::os_roots() {
-            Ok(_) => assert!(!root_store(&TlsConfig::new().with_ca_file("$.os"))
-                .unwrap()
-                .is_empty()),
+            Ok(_) => assert!(
+                !root_store(&TlsConfig::new().with_ca_file("$.os"))
+                    .unwrap()
+                    .is_empty()
+            ),
             Err(e) => eprintln!("skipping $.os: {e}"),
         }
         let missing = root_store(&TlsConfig::new().with_ca_file("$nope")).unwrap_err();

@@ -6,15 +6,15 @@
 //! Record encoding and decoding per `FileFormat`, shared by the file and object-store endpoints.
 
 use super::csv::{
-    decode_csv_row, invalid_data, pending_csv_dialect, strip_json_line_breaks, CsvHeader, UTF8_BOM,
+    CsvHeader, UTF8_BOM, decode_csv_row, invalid_data, pending_csv_dialect, strip_json_line_breaks,
 };
+use crate::CanonicalMessage;
 use crate::canonical_message::deserialize_u128;
 use crate::models::FileFormat;
-use crate::CanonicalMessage;
 use bytes::Bytes;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::warn;
 
 /// Wraps a message body for the Json/Text file formats. Generic over the payload type

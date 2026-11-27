@@ -2,9 +2,9 @@
 
 use mq_bridge::endpoints::kafka::{KafkaConsumer, KafkaPublisher};
 use mq_bridge::test_utils::{
-    add_performance_result, run_direct_perf_test, run_performance_pipeline_test,
-    run_test_with_docker, run_test_with_docker_controller, setup_logging, verify_subscriber_logic,
-    PERF_TEST_MESSAGE_COUNT,
+    PERF_TEST_MESSAGE_COUNT, add_performance_result, run_direct_perf_test,
+    run_performance_pipeline_test, run_test_with_docker, run_test_with_docker_controller,
+    setup_logging, verify_subscriber_logic,
 };
 use std::sync::Arc;
 
@@ -225,7 +225,7 @@ pub async fn test_kafka_performance_direct() {
 
 pub async fn test_kafka_status() {
     use mq_bridge::traits::{MessageConsumer, MessagePublisher};
-    use tokio::time::{sleep, Duration};
+    use tokio::time::{Duration, sleep};
 
     setup_logging();
     run_test_with_docker_controller(
@@ -306,8 +306,8 @@ pub async fn test_kafka_status() {
 /// A nacked batch must be redelivered. Kafka commits are cumulative, so before the fix the
 /// next batch's ack committed past the nacked records and they were never read again.
 pub async fn test_kafka_nack_replays_from_committed_offset() {
-    use mq_bridge::traits::{MessageConsumer, MessageDisposition, MessagePublisher};
     use mq_bridge::CanonicalMessage;
+    use mq_bridge::traits::{MessageConsumer, MessageDisposition, MessagePublisher};
     setup_logging();
     run_test_with_docker("tests/integration/docker-compose/kafka.yml", || async {
         let topic = format!("nack_replay_{}", fast_uuid_v7::gen_id());

@@ -3,7 +3,7 @@
 use mq_bridge::models::{
     CookieJarMiddleware, Endpoint, EndpointType, HttpConfig, Middleware, Route,
 };
-use mq_bridge::test_utils::{get_free_port, setup_logging, PERF_TEST_MESSAGE_COUNT};
+use mq_bridge::test_utils::{PERF_TEST_MESSAGE_COUNT, get_free_port, setup_logging};
 use serde_yaml_ng;
 use std::collections::HashMap;
 use std::convert::Infallible;

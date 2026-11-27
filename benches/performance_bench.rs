@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -11,8 +11,8 @@ mod integration; // Still needed for backend modules like kafka, nats etc.
 
 use mq_bridge::bench_backend;
 use mq_bridge::test_utils::{
-    fail_on_incomplete_benchmarks, print_benchmark_results, PerformanceResult,
-    PERF_TEST_CONCURRENCY,
+    PERF_TEST_CONCURRENCY, PerformanceResult, fail_on_incomplete_benchmarks,
+    print_benchmark_results,
 };
 
 const PERF_TEST_MESSAGE_COUNT: usize = 1000;
@@ -328,8 +328,8 @@ pub mod zeromq_helper {
     use mq_bridge::traits::{MessageConsumer, MessagePublisher};
     use once_cell::sync::Lazy;
     use rand::RngExt;
-    use std::sync::atomic::{AtomicU16, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU16, Ordering};
     use tokio::sync::Mutex;
 
     static PORT: Lazy<AtomicU16> = Lazy::new(|| {

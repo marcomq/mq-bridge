@@ -1,5 +1,5 @@
-use crate::traits::{BoxFuture, EndpointStatus, MessagePublisher, PublisherError, Sent, SentBatch};
 use crate::CanonicalMessage;
+use crate::traits::{BoxFuture, EndpointStatus, MessagePublisher, PublisherError, Sent, SentBatch};
 use async_trait::async_trait;
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
@@ -235,8 +235,8 @@ mod tests {
     use super::*;
     use crate::errors::ProcessingError;
     use async_trait::async_trait;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Default)]
     struct RecordingPublisher {

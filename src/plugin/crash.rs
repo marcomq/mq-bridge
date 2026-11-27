@@ -31,7 +31,7 @@ pub(super) unsafe extern "C" fn register_crash_handler(
 
 #[cfg(unix)]
 mod imp {
-    use std::ffi::{c_int, c_void, CStr};
+    use std::ffi::{CStr, c_int, c_void};
     use std::fmt::Write as _;
     use std::path::Path;
     use std::ptr::{null, null_mut};
@@ -39,7 +39,7 @@ mod imp {
     use std::sync::{Once, OnceLock};
 
     use crate::support::plugin_abi::{
-        MqbCrashHandler, MqbCrashInfo, MqbStatus, MQB_ERR_PERMANENT, MQB_ERR_UNSUPPORTED, MQB_OK,
+        MQB_ERR_PERMANENT, MQB_ERR_UNSUPPORTED, MQB_OK, MqbCrashHandler, MqbCrashInfo, MqbStatus,
     };
 
     const SIGNALS: [c_int; 5] = [
@@ -431,7 +431,7 @@ mod imp {
     use std::ffi::c_void;
     use std::path::Path;
 
-    use crate::support::plugin_abi::{MqbCrashHandler, MqbStatus, MQB_ERR_UNSUPPORTED};
+    use crate::support::plugin_abi::{MQB_ERR_UNSUPPORTED, MqbCrashHandler, MqbStatus};
 
     pub(in crate::plugin) fn install() {}
 
@@ -449,7 +449,7 @@ mod tests {
     use std::process::Command;
 
     use crate::support::plugin_abi::{
-        MqbCrashInfo, MQB_ERR_PERMANENT, MQB_ERR_UNSUPPORTED, MQB_OK,
+        MQB_ERR_PERMANENT, MQB_ERR_UNSUPPORTED, MQB_OK, MqbCrashInfo,
     };
 
     const CHILD: &str = "MQB_CRASH_TEST_CHILD";

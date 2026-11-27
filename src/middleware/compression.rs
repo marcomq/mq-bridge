@@ -8,13 +8,13 @@
 //! decompresses it. Metadata and routing keys stay untouched. `Compression::None`
 //! is a passthrough.
 
+use crate::CanonicalMessage;
 use crate::models::{Compression, CompressionMiddleware, InputErrorPolicy};
 use crate::support::compression::{compress_member, decompress_all};
 use crate::traits::{
     BatchCommitFunc, BoxFuture, ConsumerError, MessageConsumer, MessageDisposition,
     MessagePublisher, PublisherError, Received, ReceivedBatch, Sent, SentBatch,
 };
-use crate::CanonicalMessage;
 use async_trait::async_trait;
 use std::any::Any;
 

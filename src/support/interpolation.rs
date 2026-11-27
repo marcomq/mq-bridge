@@ -42,15 +42,15 @@
 //! any other value fails the whole render (`render` then yields an empty body).
 //! `gen`/`env` values are framework/operator-generated and are never escaped.
 
-use anyhow::{anyhow, bail, Context};
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use anyhow::{Context, anyhow, bail};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::Deserialize;
+use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde_json::Value;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::canonical_message::{format_message_id, CanonicalMessage};
+use crate::canonical_message::{CanonicalMessage, format_message_id};
 
 /// How resolved external values are escaped before being spliced into the body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

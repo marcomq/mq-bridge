@@ -189,6 +189,24 @@ const CAPABILITIES: &[EndpointCapabilities] = &[
         ..row("kafka", TlsBlock)
     },
     EndpointCapabilities {
+        input: false,
+        acknowledges: Na,
+        ordered_commit: Na,
+        replies: Yes,
+        output_note: "The reply is the final answer; mq-bridge runs the tool and MCP calls.",
+        security_note: "API key; MCP server tokens; `command` starts a local process.",
+        ..row("llm_agent", TlsBlock)
+    },
+    EndpointCapabilities {
+        input: false,
+        acknowledges: Na,
+        ordered_commit: Na,
+        replies: Yes,
+        output_note: "The reply is the final answer; the provider runs the tool and MCP calls.",
+        security_note: "API key; MCP server tokens.",
+        ..row("llm_hosted_agent", TlsBlock)
+    },
+    EndpointCapabilities {
         ordered_publish: With("operation"),
         input_note: "A paged read of one index.",
         security_note: "API key.",
@@ -386,11 +404,7 @@ mod tests {
     }
 
     fn yes_no(value: bool) -> &'static str {
-        if value {
-            "yes"
-        } else {
-            "no"
-        }
+        if value { "yes" } else { "no" }
     }
 
     fn render() -> String {
@@ -565,6 +579,8 @@ mod tests {
             ("http_bulk", has_tls_block::<HttpBulkConfig>()),
             ("ibmmq", has_tls_block::<IbmMqConfig>()),
             ("kafka", has_tls_block::<KafkaConfig>()),
+            ("llm_agent", has_tls_block::<LlmAgentConfig>()),
+            ("llm_hosted_agent", has_tls_block::<LlmHostedAgentConfig>()),
             ("meilisearch", has_tls_block::<MeilisearchConfig>()),
             ("memory", has_tls_block::<MemoryConfig>()),
             ("mongodb", has_tls_block::<MongoDbConfig>()),

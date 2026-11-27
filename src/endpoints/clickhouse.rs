@@ -17,6 +17,7 @@
 //! crate's `?`-as-bind-placeholder quirk that would corrupt JSON payloads containing `?`.
 
 use super::poll::PollBackoff;
+use crate::CanonicalMessage;
 use crate::checkpoint::{self, CheckpointBackend, CheckpointStore, VersionedCheckpoint};
 use crate::models::{ClickHouseConfig, Compression};
 use crate::support::cursor_batch::{CursorPosition, Unsettled};
@@ -26,8 +27,7 @@ use crate::traits::{
     BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
     MessagePublisher, PublisherError, ReceivedBatch, Sent, SentBatch,
 };
-use crate::CanonicalMessage;
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use async_trait::async_trait;
 use percent_encoding::percent_decode_str;
 use std::sync::{Arc, Mutex};
@@ -943,23 +943,23 @@ impl MessageConsumer for ClickHouseCursorReader {
                 Some(cur) => {
                     let (ty, val) = cur.param();
                     let sql = format!(
-                    "SELECT {cols} FROM {table} WHERE {col} > {{last:{ty}}} ORDER BY {col} ASC LIMIT {lim} FORMAT JSONEachRow",
-                    cols = self.select_columns,
-                    table = self.table,
-                    col = self.cursor_column,
-                    ty = ty,
-                    lim = fetch_limit,
-                );
+                        "SELECT {cols} FROM {table} WHERE {col} > {{last:{ty}}} ORDER BY {col} ASC LIMIT {lim} FORMAT JSONEachRow",
+                        cols = self.select_columns,
+                        table = self.table,
+                        col = self.cursor_column,
+                        ty = ty,
+                        lim = fetch_limit,
+                    );
                     (sql, vec![("param_last", val)])
                 }
                 None => {
                     let sql = format!(
-                    "SELECT {cols} FROM {table} ORDER BY {col} ASC LIMIT {lim} FORMAT JSONEachRow",
-                    cols = self.select_columns,
-                    table = self.table,
-                    col = self.cursor_column,
-                    lim = fetch_limit,
-                );
+                        "SELECT {cols} FROM {table} ORDER BY {col} ASC LIMIT {lim} FORMAT JSONEachRow",
+                        cols = self.select_columns,
+                        table = self.table,
+                        col = self.cursor_column,
+                        lim = fetch_limit,
+                    );
                     (sql, Vec::new())
                 }
             };
@@ -1021,12 +1021,12 @@ impl MessageConsumer for ClickHouseCursorReader {
                     // it. Advancing past the value would silently skip the remainder, so fail loudly
                     // instead of losing rows. Permanent: re-polling returns the same page forever.
                     return Err(ConsumerError::Permanent(anyhow!(
-                    "cursor_column '{}' has a group of equal values larger than batch_size ({}); \
+                        "cursor_column '{}' has a group of equal values larger than batch_size ({}); \
                      cannot page without skipping rows. Increase batch_size above the size of the \
                      largest equal-value group.",
-                    self.cursor_column,
-                    max_messages
-                )));
+                        self.cursor_column,
+                        max_messages
+                    )));
                 }
             }
             fetched.truncate(emit_len);

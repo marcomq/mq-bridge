@@ -9,9 +9,9 @@
 use super::quoted;
 use crate::models::{HttpBulkAuth, HttpBulkLogin, HttpBulkOAuth2};
 use crate::support::http_status;
-use anyhow::{bail, Context};
-use reqwest::header::{HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use anyhow::{Context, bail};
 use reqwest::StatusCode;
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 use serde_json::Value;
 use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -195,7 +195,9 @@ impl TokenSource {
             config.expires_in.as_ref(),
         ];
         if pointers.into_iter().flatten().any(|p| !p.starts_with('/')) {
-            bail!("http_bulk auth.login token, expires_at and expires_in are JSON pointers starting with '/'");
+            bail!(
+                "http_bulk auth.login token, expires_at and expires_in are JSON pointers starting with '/'"
+            );
         }
         let expiry = match (&config.expires_at, &config.expires_in) {
             (Some(_), Some(_)) => {
@@ -309,7 +311,7 @@ mod sigv4 {
     use anyhow::bail;
     use aws_sdk_sns::config::{Credentials, ProvideCredentials, SharedCredentialsProvider};
     use aws_sigv4::http_request::{
-        sign, PayloadChecksumKind, SignableBody, SignableRequest, SigningSettings,
+        PayloadChecksumKind, SignableBody, SignableRequest, SigningSettings, sign,
     };
     use aws_sigv4::sign::v4;
     use reqwest::header::{HeaderName, HeaderValue};
@@ -434,9 +436,9 @@ mod tests {
     use crate::outcomes::SentBatch;
     use crate::plugin::test_support::{StubHttpServer, StubRequest};
     use crate::traits::MessagePublisher;
-    use serde_json::{json, Value};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use serde_json::{Value, json};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     async fn server(
         respond: impl Fn(&StubRequest) -> (u16, String) + Send + Sync + 'static,
@@ -719,7 +721,7 @@ mod tests {
     #[cfg(feature = "aws")]
     #[tokio::test]
     async fn sigv4_signs_the_path_exactly_as_it_is_sent() {
-        use aws_sigv4::http_request::{sign, SignableBody, SignableRequest, SigningSettings};
+        use aws_sigv4::http_request::{SignableBody, SignableRequest, SigningSettings, sign};
         let server = server(|_| (200, "{}".to_string())).await;
         let auth = json!({"aws_sigv4": {
             "region": "us-east-1", "service": "bedrock",

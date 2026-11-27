@@ -21,9 +21,9 @@ use mq_bridge::traits::{
 };
 use mq_bridge::{CanonicalMessage, SentBatch};
 use mq_bridge_plugin_fixture::{
-    commit_log_queue, disconnect_log_queue, drop_log_queue, FixtureFactory,
+    FixtureFactory, commit_log_queue, disconnect_log_queue, drop_log_queue,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 const WORKSPACE: &str = env!("CARGO_MANIFEST_DIR");
 const WAIT: Duration = Duration::from_secs(5);
@@ -349,9 +349,11 @@ async fn a_partial_publish_survives_the_abi() {
     let SentBatch::Partial { failed, .. } = &sent else {
         unreachable!()
     };
-    assert!(failed
-        .iter()
-        .all(|(_, error)| matches!(error, PublisherError::Retryable(_))));
+    assert!(
+        failed
+            .iter()
+            .all(|(_, error)| matches!(error, PublisherError::Retryable(_)))
+    );
 
     let direct = publisher(&FixtureFactory, config.clone()).await;
     assert_eq!(

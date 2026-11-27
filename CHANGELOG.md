@@ -2,6 +2,97 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
+## 1.7.0
+
+### Added
+
+- **`llm_hosted_agent` endpoint: the provider runs the tool and MCP loop.** One request per message to
+  OpenAI's Responses API (also Azure, xAI, etc) or Anthropic's Messages API with its MCP
+  connector; `mcp_servers` lists the remote servers the model may call. The answer is the final
+  text, or with `answer: full` the whole response. A failed, incomplete or refused response fails
+  its message. Amazon Bedrock Agents is not supported; Bedrock models work through `openai_chat`
+  and `llm_agent`.
+- **`llm_agent` endpoint: mq-bridge runs the tool loop itself.** Tools are endpoints that answer
+  (`tools`) or the tools of MCP servers, over Streamable HTTP (`url`) or as a local process over
+  stdio (`command`). Speaks the OpenAI Responses API, Anthropic Messages and Chat Completions
+  (Ollama, vLLM, Groq, Bedrock, the Gemini and Cohere compatibility APIs). The history stays in
+  the provider's format, so reasoning and thinking blocks go back unchanged. A failing tool
+  answers the model with an error; `max_rounds` bounds the loop; the answer carries
+  `llm_rounds` and token counts. Feature `llm-agent` (rmcp 3.12 as MCP client), in the full
+  plugin. The app's MCP server moves to rmcp 3.12 as well.
+- **`Bridge`: named instances for embedding applications.** Routes, publishers, callers, `ref`
+  endpoints and in-process topics get their own namespace, so two parts of an application can
+  use the same names. An optional `PolicyHook` approves every endpoint, nested ones included,
+  before it is used, and an optional `AuditSink` receives lifecycle events. This separates
+  names and is not a security boundary. The top-level API is unchanged.
+- **Applications can install their own sqlx drivers.** SQL endpoints panicked if the application
+  had already called `sqlx::any::install_drivers()`. Call
+  `mq_bridge::endpoints::sqlx::use_host_sqlx_drivers()` first, and mq-bridge leaves the drivers alone.
+- **Delivery contract for built-in and plugin endpoints.** `mq_bridge::test_utils::contract`
+  (feature `test-utils`) runs one check catalog against any endpoint and reports every check
+  as passed, failed or skipped. It adds parallel sends with rejects, reconnects, batch sizes,
+  writes before a consumer exists, repeated open and close, payload fidelity, a large backlog
+  and sink-only targets. `scripts/contract.sh` runs it per broker and removes the containers.
+- **Process scenarios for any endpoint.** The CLI suite runs SIGTERM, `kill -9` and broker
+  restart scenarios against a plugin through `MQB_TEST_PLUGIN` and `MQB_TEST_TARGET`, and
+  against another `mqb` build through `MQB_TEST_BIN`.
+- **`StreamCaller`: request/reply with a streamed answer.** It sends a request to an
+  `openai_chat` or `http_bulk` endpoint with `stream_to` and reads that request's tokens. A
+  reply always ends with one last token, a retried attempt does not end it, and dropping an
+  unfinished reply cancels the request. One caller serves parallel requests under different
+  correlation ids. `StreamToken` reads and writes the `mqb.stream.*` format.
+- **`Publisher::blocking_send`** sends from a plain OS thread and returns once the message was
+  accepted.
+- **Named outputs for blocking handlers.** `ThreadedHandler::builder` declares a handler's
+  `Publisher`s, and `ctx.output(name)` reads them. Unlike `ctx.emit`, they add no `correlation_id`,
+  so a cancel does not skip what they send.
+- **`Topology` wires routes up in one place.** It starts them in declaration order, stops them in
+  reverse or in an explicit order, cleans up after a failed start and names the failing route.
+  `stop()` leaves a route alone that was deployed again since. `diagram()` shows each route with
+  its handler's declared outputs.
+- **`Route::handled_by(input, handler)` declares a route that ends in its handler**, without a
+  placeholder `Endpoint::null()` output.
+- **`http_bulk` queries log token usage.** At `DEBUG`, each non-streaming response with an
+  OpenAI-style `usage` logs `prompt_tokens`, `cached_tokens` and `completion_tokens`.
+
+### Changed
+
+- **`sqlx`: a `${payload:x}` integer above the `BIGINT` range keeps every digit.** It was
+  bound as a float and silently rounded. It now binds as text, as `columns: auto` already
+  does. A query writing such a value into a PostgreSQL `float8` or `numeric` column without
+  a cast now fails with error `42804`; write `CAST(${payload:x} AS numeric)` there.
+- **The minimum Rust version is 1.91**, up from 1.89: amq-protocol 10.8 and newer need it.
+- **`link-dynamic` / `full-dynamic` needs librdkafka 2.16.0 or newer.** rdkafka-sys moves to
+  4.11 (bundled librdkafka 2.16.0), and its build script now probes pkg-config for
+  librdkafka >= 2.16.0. A build against an older system or conda-forge librdkafka fails;
+  update librdkafka there first. rdkafka itself stays at 0.39: 0.40 would force every
+  crate that uses rdkafka next to mq-bridge to move as well, since only one librdkafka can
+  be linked. A project whose `Cargo.lock` still pins rdkafka-sys 4.10 fails to resolve
+  ("failed to select a version for `rdkafka-sys`") when it upgrades mq-bridge; run
+  `cargo update -p rdkafka-sys` first (likewise `cargo update -p uuid` for apache-avro's
+  uuid 1.29 floor), or plain `cargo update`. Also bumps async-nats 0.53, apache-avro 0.23 and omq-tokio 0.39. async-nats
+  now refuses a server that offers no TLS when `tls.required` is set, before the handshake
+  instead of during it. The re-export `mq_bridge::async_nats` follows: code that mixes it
+  with its own `async-nats = "0.52"` must move to 0.53 as well.
+
+### Fixed
+- **`ThreadedHandler` no longer runs a queued message whose caller gave up.** After a timeout or an
+  aborted route, the message ran anyway and then again when it was redelivered.
+- **`openai_chat`: a `system` prompt that names its own answer format no longer breaks
+  `messages_per_request`.** The model followed that format instead of the `answers` array, so
+  a bundle of 15 messages was split into 12 requests and could lose a message. A bundle now
+  sends a `json_schema` with one numbered entry per input, and each entry's field is `result`.
+  A server that refuses the schema needs another `response_format` in `options`, e.g.
+  `{ type: text }`.
+- **`openai_chat`: a bundle keeps the answers it got.** A response with missing entries used
+  to be discarded and asked again in halves. Now only the missing messages are asked again.
+- **`sled` output and `deduplication`: concurrent sends no longer hang.** Concurrent
+  `flush_async` calls deadlock in sled 0.34, so a route could stop for good without an error.
+  The flush now runs on a blocking thread.
+- **`ibmmq` input: a partly filled batch no longer stalls.** An empty queue did not end the
+  batch, so each remaining slot waited `wait_timeout_ms` again. With the defaults, one message
+  could take over 8 minutes to arrive. The batch now ends at the first empty wait.
+
 ## 1.6.2
 
 ### Fixed

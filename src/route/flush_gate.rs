@@ -17,12 +17,12 @@
 //! and the ordered sequencer is closed, so no later batch commits past the gap. The
 //! source redelivers those batches after the reconnect.
 
-use super::{report_route_error, SequencerItem};
+use super::{SequencerItem, report_route_error};
 use crate::traits::{BatchCommitFunc, MessageDisposition, MessagePublisher};
 use async_channel::Sender;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot, Semaphore};
+use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 

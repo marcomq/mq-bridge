@@ -6,9 +6,9 @@
 //!
 //! Run with: `cargo bench --bench chain_matrix_bench --features test-utils,filter,aggregate`
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use mq_bridge::models::{Endpoint, EndpointType, Middleware, Route};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use mq_bridge::CanonicalMessage;
+use mq_bridge::models::{Endpoint, EndpointType, Middleware, Route};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 

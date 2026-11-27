@@ -9,17 +9,17 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 
 use super::{
-    crash, host, loaded_plugins, plugin_loading_disabled, register_plugin, unregister_plugin,
-    LoadedPlugin, PluginInfo,
+    LoadedPlugin, PluginInfo, crash, host, loaded_plugins, plugin_loading_disabled,
+    register_plugin, unregister_plugin,
 };
 use crate::extensions::{get_endpoint_factory, get_middleware_factory};
 use crate::support::plugin_abi::{
-    check_compatibility, MqbBuffer, MqbFactoryHandle, MqbPluginEntry, MqbPluginListEntry,
-    MqbPluginVTable, MQB_OK, MQB_PLUGIN_ENTRY_SYMBOL, MQB_PLUGIN_LIST_SYMBOL, MQB_SCHEMA_ENDPOINT,
-    MQB_SCHEMA_MIDDLEWARE,
+    MQB_OK, MQB_PLUGIN_ENTRY_SYMBOL, MQB_PLUGIN_LIST_SYMBOL, MQB_SCHEMA_ENDPOINT,
+    MQB_SCHEMA_MIDDLEWARE, MqbBuffer, MqbFactoryHandle, MqbPluginEntry, MqbPluginListEntry,
+    MqbPluginVTable, check_compatibility,
 };
 
 /// Loads a native endpoint plugin and registers the endpoint it provides.

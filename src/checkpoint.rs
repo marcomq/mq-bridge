@@ -11,7 +11,7 @@
 //! column value) into a string it can decode back. Endpoints persist them through
 //! [`VersionedCheckpoint`], which records which source wrote the value and when.
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -527,10 +527,10 @@ pub async fn build_external_store(
 /// no cross-process locking needed). URL/creds are resolved by `object_store` from env vars.
 #[cfg(feature = "object-store")]
 pub(crate) mod object_store_backend {
-    use super::{object_store_checkpoint_key, CheckpointStore};
+    use super::{CheckpointStore, object_store_checkpoint_key};
     use anyhow::Context;
     use async_trait::async_trait;
-    use object_store::{path::Path as ObjPath, ObjectStore, ObjectStoreExt};
+    use object_store::{ObjectStore, ObjectStoreExt, path::Path as ObjPath};
     use std::sync::Arc;
 
     /// Builds an `object_store` backend and its base prefix `Path` from a URL. Credentials and

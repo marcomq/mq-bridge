@@ -3,10 +3,10 @@
 //  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
+use crate::CanonicalMessage;
 use crate::canonical_message::is_source_metadata_key;
 use crate::traits::{Handled, HandlerError, Passthrough};
 use crate::traits::{Handler, MessagePublisher};
-use crate::CanonicalMessage;
 use async_trait::async_trait;
 use std::any::Any;
 use std::future::Future;
@@ -592,8 +592,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_command_handler_send_batch_batches_inner_publish_and_reports_per_message_failures(
-    ) {
+    async fn test_command_handler_send_batch_batches_inner_publish_and_reports_per_message_failures()
+     {
         struct PublishAllHandler;
 
         #[async_trait]

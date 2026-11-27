@@ -206,6 +206,8 @@ class Endpoint(TypedDict, total=False):
     http_bulk: HttpBulkConfig
     ibmmq: IbmMqConfig
     kafka: KafkaConfig
+    llm_agent: LlmAgentConfig
+    llm_hosted_agent: LlmHostedAgentConfig
     meilisearch: MeilisearchConfig
     memory: MemoryConfig
     middlewares: List[Middleware]
@@ -526,6 +528,76 @@ class KafkaConfig(TypedDict, total=False):
 class LimiterMiddleware(TypedDict, total=False):
     """Throughput limiter middleware configuration."""
     messages_per_second: Required[float]
+
+
+class LlmAgentConfig(TypedDict, total=False):
+    """The `llm_agent` endpoint: mq-bridge runs the tool loop, calling endpoints and MCP servers itself."""
+    answer: LlmAnswer
+    api_key: Optional[str]
+    auth: Any
+    concurrency: Optional[int]
+    json: bool
+    max_rounds: Optional[int]
+    max_tokens: Optional[int]
+    mcp_servers: List[LlmMcpServer]
+    messages_from_payload: bool
+    model: Required[str]
+    options: Any
+    prompt: str
+    provider: LlmProvider
+    request_timeout_ms: Optional[int]
+    system: Optional[str]
+    tls: Any
+    tool_concurrency: Optional[int]
+    tools: List[LlmTool]
+    url: Optional[str]
+
+
+class LlmHostedAgentConfig(TypedDict, total=False):
+    """The `llm_hosted_agent` endpoint: one request per message; the provider runs the tool and MCP loop."""
+    answer: LlmAnswer
+    api_key: Optional[str]
+    auth: Any
+    concurrency: Optional[int]
+    json: bool
+    max_tokens: Optional[int]
+    mcp_servers: List[LlmHostedMcpServer]
+    messages_from_payload: bool
+    model: Required[str]
+    options: Any
+    prompt: str
+    provider: LlmHostedProvider
+    request_timeout_ms: Optional[int]
+    system: Optional[str]
+    tls: Any
+    url: Optional[str]
+
+
+class LlmHostedMcpServer(TypedDict, total=False):
+    """A remote MCP server the provider calls on the agent's behalf."""
+    allowed_tools: Optional[List[str]]
+    name: Required[str]
+    token: Optional[str]
+    url: Required[str]
+
+
+class LlmMcpServer(TypedDict, total=False):
+    """An MCP server mq-bridge calls: `url` (Streamable HTTP) or `command` (a local process over stdio)."""
+    allowed_tools: Optional[List[str]]
+    args: List[str]
+    command: Optional[str]
+    env: Dict[str, str]
+    name: Required[str]
+    token: Optional[str]
+    url: Optional[str]
+
+
+class LlmTool(TypedDict, total=False):
+    """A tool the model may call: its arguments go to `endpoint`, whose answer is the result."""
+    description: Optional[str]
+    endpoint: Required[Endpoint]
+    name: Required[str]
+    schema: Any
 
 
 # One lookup of a `lookup` middleware.
@@ -1035,6 +1107,9 @@ HttpBulkStream = Literal["sse", "ndjson"]
 HttpServerProtocol = Literal["auto", "http1_only", "http2_only"]
 IdHash = Literal["fnv1a", "sha256"]
 InputErrorPolicy = Literal["fail", "drop"]
+LlmAnswer = Literal["text", "full"]
+LlmHostedProvider = Literal["openai", "anthropic"]
+LlmProvider = Literal["openai", "anthropic", "openai_chat"]
 MappingRule = Union[str, DetailedMappingRule]
 MongoConsume = Literal["delete", "snapshot", "capture_new", "capture_all"]
 MongoDbFormat = Literal["normal", "json", "text", "raw", "envelope", "envelope_json", "envelope_text", "payload"]

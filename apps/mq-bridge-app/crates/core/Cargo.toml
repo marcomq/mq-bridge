@@ -74,8 +74,8 @@ default = ["full", "zeromq-omq"]
 integration-test = []
 ibm-mq = ["mq-bridge/ibm-mq"]
 arm64-cross-compile = ["rdkafka", "rdkafka/cmake-build"]
-full = ["mq-bridge/full", "otel", "rustls-aws-lc", "pulsar", "http-bulk"]
-full-dynamic = ["mq-bridge/full-dynamic", "otel", "rustls-aws-lc", "pulsar", "http-bulk"]
+full = ["mq-bridge/full", "otel", "rustls-aws-lc", "pulsar", "http-bulk", "llm-agent"]
+full-dynamic = ["mq-bridge/full-dynamic", "otel", "rustls-aws-lc", "pulsar", "http-bulk", "llm-agent"]
 # Lean feature set for the ETL/CDC benchmarks (benches/etl): Postgres bulk-insert
 # (sqlx) + logical-replication CDC + per-route metrics. Avoids the heavy `full`
 # deps (rdkafka/librdkafka, grpc/protoc, ibm-mq) that aren't needed to move
@@ -126,6 +126,8 @@ redis-streams = ["mq-bridge/redis-streams"]
 object-store = ["mq-bridge/object-store"]
 # Also registers the named endpoints built on it (`meilisearch`, `typesense`, `qdrant`, `openai_chat`, …).
 http-bulk = ["mq-bridge/http-bulk"]
+# `llm_agent`: the tool loop with endpoints and MCP servers as tools.
+llm-agent = ["http-bulk", "mq-bridge/llm-agent"]
 # Extension endpoint maintained as a separate crate. `pulsar` is in `full`, so a
 # default build addresses `pulsar://` with no install step. It is also loadable
 # as a plugin, so leaving it out costs no reach.

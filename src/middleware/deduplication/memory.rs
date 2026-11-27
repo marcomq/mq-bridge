@@ -5,7 +5,7 @@
 
 //! In-process deduplication store, selected by a `memory://[name][?max_keys=N]` `store:` URL.
 
-use super::{DedupStore, Reservation, PENDING_TTL_SECS};
+use super::{DedupStore, PENDING_TTL_SECS, Reservation};
 use crate::traits::ConsumerError;
 use async_trait::async_trait;
 use hashbrown::{DefaultHashBuilder, HashTable};

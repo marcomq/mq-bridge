@@ -150,8 +150,10 @@
 //!   configuration types.
 //! - Read the [architecture guide](https://github.com/marcomq/mq-bridge/blob/dev/docs/ARCHITECTURE.md)
 //!   for routing, handlers, batching, and delivery semantics.
+//! - Read [`handlers_guide`] for blocking handlers, `emit`, cancelling and streamed answers.
 //! - Read the [documentation book](https://marcomq.github.io/mq-bridge/) for setup,
 //!   connector configuration, and recipes.
+//! - Coding agents: the crate ships `llms.txt` and `docs/REFERENCE.md` for this exact version.
 //!
 //! # Stability
 //!
@@ -178,7 +180,12 @@
 #![warn(rustdoc::broken_intra_doc_links)]
 #![warn(rustdoc::missing_crate_level_docs)]
 
+#[cfg(any(doc, doctest))]
+#[doc = include_str!("../docs/HANDLERS.md")]
+pub mod handlers_guide {}
+
 pub mod blocking_handler;
+pub mod bridge;
 pub mod caller;
 pub mod canonical_message;
 // Not feature-gated: the trait, the file backend and the URL parser need no
@@ -203,6 +210,7 @@ pub mod publisher;
 pub mod response;
 pub mod route;
 pub mod shutdown;
+pub mod stream_caller;
 pub mod support;
 #[cfg(feature = "test-utils")]
 pub mod test_utils;
@@ -210,6 +218,7 @@ pub mod traits;
 pub mod type_handler;
 
 pub use anyhow;
+pub use bridge::Bridge;
 pub use caller::{CallFields, Caller, CallerBuilder};
 pub use canonical_message::{CanonicalMessage, MessageContext};
 pub use config_file::deploy_file;
@@ -217,12 +226,14 @@ pub use errors::HandlerError;
 pub use models::Route;
 pub use outcomes::{Handled, Passthrough, Received, ReceivedBatch, Sent, SentBatch};
 pub use publisher::Publisher;
+pub use stream_caller::{StreamCaller, StreamCancel, StreamEnd, StreamReply, StreamToken};
 
 pub use endpoints::memory::get_or_create_channel;
 pub use publisher::{get_publisher, list_publishers, register_publisher, unregister_publisher};
 pub use route::{
-    get_route, list_routes, register_endpoint, route_outcome, route_status, set_route_display_name,
-    stop_route, unregister_endpoint, with_endpoint_overrides, RouteOutcome,
+    DeployedTopology, RouteOutcome, Topology, TopologyError, get_route, list_routes,
+    register_endpoint, route_outcome, route_status, set_route_display_name, stop_route,
+    unregister_endpoint, with_endpoint_overrides,
 };
 
 // Re-export the underlying driver crate for each feature-gated endpoint, so

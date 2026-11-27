@@ -6,8 +6,8 @@
 //! Cutting bytes into records on a delimiter. For CSV a delimiter inside a quoted field is
 //! data, so a record can span several delimiters.
 
-use super::csv::CsvQuoteState;
 use super::CsvDialect;
+use super::csv::CsvQuoteState;
 use crate::models::FileFormat;
 
 /// Quote state after `first`, a record's first delimited piece; `None` unless the format

@@ -765,6 +765,29 @@ kafka_to_nats:
     }
 
     #[test]
+    fn auth_given_as_json_text_has_its_credentials_extracted() {
+        let mut config = ElasticsearchConfig {
+            auth: Some(serde_json::json!(
+                r#"{"oauth2": {"token_url": "https://idp/token", "client_secret": "cs"}}"#
+            )),
+            ..Default::default()
+        };
+        let mut secrets = HashMap::new();
+        config.extract_secrets("P", &mut secrets);
+
+        assert_eq!(
+            config.auth,
+            Some(serde_json::json!({"oauth2": {"token_url": "https://idp/token"}}))
+        );
+        assert_eq!(
+            secrets
+                .get("P__AUTH__OAUTH2__CLIENT_SECRET")
+                .map(String::as_str),
+            Some("cs")
+        );
+    }
+
+    #[test]
     fn grpc_binary_metadata_is_extracted_reversibly() {
         let mut grpc = GrpcConfig::new("https://localhost:50051");
         grpc.binary_metadata
@@ -898,9 +921,10 @@ kafka_to_nats:
     #[test]
     fn test_memory_config_requires_topic_or_url() {
         let err = serde_yaml_ng::from_str::<MemoryConfig>("{}").unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("MemoryConfig: 'topic' (or 'url' alias) is required."));
+        assert!(
+            err.to_string()
+                .contains("MemoryConfig: 'topic' (or 'url' alias) is required.")
+        );
     }
 
     #[test]

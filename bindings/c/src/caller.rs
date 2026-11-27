@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::anyhow;
-use mqb::support::plugin_abi::{MqbStatus, MQB_OK};
+use mqb::support::plugin_abi::{MQB_OK, MqbStatus};
 use mqb::{Caller, Sent};
 use tokio::runtime::Runtime;
 

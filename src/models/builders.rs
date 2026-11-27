@@ -194,6 +194,8 @@ impl EndpointType {
             EndpointType::Elasticsearch(_) => "elasticsearch",
             EndpointType::Meilisearch(_) => "meilisearch",
             EndpointType::OpenAiChat(_) => "openai_chat",
+            EndpointType::LlmHostedAgent(_) => "llm_hosted_agent",
+            EndpointType::LlmAgent(_) => "llm_agent",
             EndpointType::OpenAiEmbeddings(_) => "openai_embeddings",
             EndpointType::Qdrant(_) => "qdrant",
             EndpointType::Typesense(_) => "typesense",

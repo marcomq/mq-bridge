@@ -1,16 +1,16 @@
+use crate::APP_NAME;
+use crate::CanonicalMessage;
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::NatsConfig;
 use crate::traits::{
     BatchCommitFunc, BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
     MessagePublisher, PublisherError, ReceivedBatch, Sent, SentBatch,
 };
-use crate::CanonicalMessage;
-use crate::APP_NAME;
 use anyhow::anyhow;
 use async_nats::connection::State;
 use async_nats::header::{HeaderMap, HeaderName, HeaderValue};
 use async_nats::jetstream::consumer::pull;
-use async_nats::{jetstream, jetstream::stream, ConnectOptions};
+use async_nats::{ConnectOptions, jetstream, jetstream::stream};
 use async_trait::async_trait;
 use futures::{FutureExt, StreamExt, TryStreamExt};
 use tracing::{info, trace, warn};
@@ -99,7 +99,9 @@ impl NatsPublisher {
         } else {
             info!("NATS publisher is in Core mode (non-persistent).");
             if config.delayed_ack {
-                tracing::debug!("'delayed_ack' is true but NATS is in Core mode, which always performs fire and forget. The flag will be ignored.");
+                tracing::debug!(
+                    "'delayed_ack' is true but NATS is in Core mode, which always performs fire and forget. The flag will be ignored."
+                );
             }
             NatsClient::Core(nats_client)
         };
@@ -177,10 +179,10 @@ impl MessagePublisher for NatsPublisher {
                             return Err(PublisherError::Retryable(anyhow!(
                                 "NATS Ack failed: {}",
                                 e
-                            )))
+                            )));
                         }
                         Err(_) => {
-                            return Err(PublisherError::Retryable(anyhow!("NATS Ack timed out")))
+                            return Err(PublisherError::Retryable(anyhow!("NATS Ack timed out")));
                         }
                     }
                 }
@@ -328,8 +330,8 @@ pub struct NatsConsumer {
     held: Arc<AtomicUsize>,
 }
 use std::any::Any;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 impl NatsConsumer {
@@ -663,7 +665,7 @@ impl NatsCore {
                     None => {
                         return Err(ConsumerError::Connection(anyhow::anyhow!(
                             "NATS JetStream ended"
-                        )))
+                        )));
                     }
                 }
 
@@ -695,10 +697,10 @@ impl NatsCore {
 
                         if dispositions.len() != jetstream_messages.len() {
                             tracing::warn!(
-                                    "NATS JetStream batch reply count mismatch: received {} messages but got {} responses. Pairing up to the shorter length.",
-                                    jetstream_messages.len(),
-                                    dispositions.len()
-                                );
+                                "NATS JetStream batch reply count mismatch: received {} messages but got {} responses. Pairing up to the shorter length.",
+                                jetstream_messages.len(),
+                                dispositions.len()
+                            );
                         }
                         handle_jetstream_replies(&client, &jetstream_messages, &dispositions).await;
 
@@ -762,10 +764,10 @@ impl NatsCore {
                         let mut sent_reply = false;
                         if dispositions.len() != reply_subjects.len() {
                             tracing::warn!(
-                                    "NATS Core batch reply count mismatch: received {} messages but got {} responses. Pairing up to the shorter length.",
-                                    reply_subjects.len(),
-                                    dispositions.len()
-                                );
+                                "NATS Core batch reply count mismatch: received {} messages but got {} responses. Pairing up to the shorter length.",
+                                reply_subjects.len(),
+                                dispositions.len()
+                            );
                         }
                         for (reply_opt, disposition) in reply_subjects.iter().zip(dispositions) {
                             // Only send a reply if the NATS message has a reply subject and the disposition is a Reply.
@@ -1197,8 +1199,8 @@ mod tests {
             let (mut stream, _) = listener.accept().await.unwrap();
             let info = "INFO {\"server_id\":\"x\",\"server_name\":\"x\",\"host\":\"127.0.0.1\",\"port\":4222,\"version\":\"2.10.0\",\"go\":\"go\",\"proto\":1,\"headers\":true,\"max_payload\":1048576}\r\n";
             stream.write_all(info.as_bytes()).await.unwrap();
-            let mut first = [0u8; 7];
-            stream.read_exact(&mut first).await.unwrap();
+            let mut first = Vec::new();
+            (&mut stream).take(7).read_to_end(&mut first).await.unwrap();
             first
         });
         let config = NatsConfig {
@@ -1218,7 +1220,11 @@ mod tests {
         let _ = tokio::time::timeout(second, options.connect(&config.url)).await;
 
         let first = tokio::time::timeout(second, server).await.unwrap().unwrap();
-        assert_ne!(&first, b"CONNECT", "the client went on without TLS");
+        assert_ne!(
+            first.as_slice(),
+            b"CONNECT",
+            "the client went on without TLS"
+        );
     }
 
     #[test]

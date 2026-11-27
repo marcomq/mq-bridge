@@ -11,8 +11,9 @@ use mq_bridge::endpoints::sqlx::SqlxPublisher;
 use mq_bridge::models::{PostgresCdcConfig, SqlxConfig};
 use mq_bridge::sqlx::{Connection, PgConnection};
 use mq_bridge::test_utils::{
-    add_performance_result, run_performance_pipeline_test_named, run_test_with_docker,
-    run_test_with_docker_controller, setup_logging, PerformanceResult, PERF_TEST_MESSAGE_COUNT,
+    PERF_TEST_MESSAGE_COUNT, PerformanceResult, add_performance_result,
+    run_performance_pipeline_test_named, run_test_with_docker, run_test_with_docker_controller,
+    setup_logging,
 };
 use mq_bridge::traits::{MessageConsumer, MessageDisposition};
 use std::collections::BTreeSet;

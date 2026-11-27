@@ -82,8 +82,7 @@ pub(super) fn spawn_sequencer(
                         let (_, _, notify) = item;
                         trace!(
                             seq,
-                            next_seq,
-                            "Sequencer received late item (seq < next_seq)"
+                            next_seq, "Sequencer received late item (seq < next_seq)"
                         );
                         let _ = notify.send(Err(anyhow::anyhow!(
                             "Sequencer received late item (seq {} < next_seq {})",
@@ -284,7 +283,9 @@ pub(super) async fn receive_with_permit(
 }
 
 pub(super) fn warn_reply_missing(id: u128) {
-    warn!("Message {id:032x} expected a reply (reply_to set), but the output only acknowledged it. Committing it without a reply.");
+    warn!(
+        "Message {id:032x} expected a reply (reply_to set), but the output only acknowledged it. Committing it without a reply."
+    );
 }
 
 pub(super) fn map_responses_to_dispositions(
@@ -361,7 +362,7 @@ pub(super) fn map_responses_to_dispositions(
 
 #[cfg(test)]
 pub(super) fn test_map_responses_to_dispositions_logic() {
-    use crate::{traits::PublisherError, CanonicalMessage};
+    use crate::{CanonicalMessage, traits::PublisherError};
     use anyhow::anyhow;
 
     let ids = vec![1, 2, 3, 4];

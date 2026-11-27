@@ -1,9 +1,9 @@
+use crate::CanonicalMessage;
 use crate::models::LimiterMiddleware;
 use crate::traits::{
     BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError, Received,
     ReceivedBatch, Sent, SentBatch,
 };
-use crate::CanonicalMessage;
 use async_trait::async_trait;
 use std::any::Any;
 use std::sync::Mutex;
@@ -173,8 +173,8 @@ impl MessagePublisher for LimiterPublisher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::traits::MessagePublisher;
     use crate::CanonicalMessage;
+    use crate::traits::MessagePublisher;
     use async_trait::async_trait;
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex as StdMutex};

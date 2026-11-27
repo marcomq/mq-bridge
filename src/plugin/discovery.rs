@@ -23,9 +23,9 @@ use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 
-use super::{load_discovered_plugins, PluginInfo};
+use super::{PluginInfo, load_discovered_plugins};
 
 /// Set to `1`, `true`, `on` or `yes` to switch discovery on, or to `0`, `false`,
 /// `off` or `no` to switch it off even where [`enable_plugin_discovery`] was called.

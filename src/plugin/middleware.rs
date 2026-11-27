@@ -24,21 +24,21 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::task::AtomicWaker;
 
-use super::endpoint::{
-    consumer_error_from, join_error, plugin_consumer, plugin_publisher, publisher_error_from,
-    AssertSend,
-};
-use super::message::{read_message, AbiMessages};
 use super::LoadedPlugin;
+use super::endpoint::{
+    AssertSend, consumer_error_from, join_error, plugin_consumer, plugin_publisher,
+    publisher_error_from,
+};
+use super::message::{AbiMessages, read_message};
 use crate::errors::{ConsumerError, PublisherError};
-use crate::middleware::deferred_commit::{run_all, DeferredCommits};
+use crate::middleware::deferred_commit::{DeferredCommits, run_all};
 use crate::middleware::lookup::lookup_through;
 use crate::support::plugin_abi::{
-    MqbBuffer, MqbCompletion, MqbConsumerHandle, MqbFilterHandle, MqbMessage,
-    MqbMiddlewareApplyAsync, MqbMiddlewareHandle, MqbPublisherHandle, MqbSlice, MqbStatus,
     MQB_END_OF_STREAM, MQB_ERR_CONNECTION, MQB_ERR_INVALID_CONFIG, MQB_ERR_PANIC,
     MQB_ERR_PERMANENT, MQB_ERR_UNSUPPORTED, MQB_MESSAGE_DROPPED, MQB_MESSAGE_KEPT,
     MQB_MESSAGE_REPLACED, MQB_MIDDLEWARE_RECEIVE, MQB_MIDDLEWARE_SEND, MQB_OK, MQB_PENDING,
+    MqbBuffer, MqbCompletion, MqbConsumerHandle, MqbFilterHandle, MqbMessage,
+    MqbMiddlewareApplyAsync, MqbMiddlewareHandle, MqbPublisherHandle, MqbSlice, MqbStatus,
 };
 use crate::traits::{
     BatchCommitFunc, BoxFuture, CustomMiddlewareFactory, EndpointStatus, MessageConsumer,
@@ -629,7 +629,7 @@ unsafe fn settle(
     let replacements: &[MqbMessage] = match count {
         0 => &[],
         _ if replaced.is_null() => {
-            return Err(malformed(plugin, "returned a null replacement array"))
+            return Err(malformed(plugin, "returned a null replacement array"));
         }
         _ => unsafe { std::slice::from_raw_parts(replaced, count) },
     };
@@ -660,7 +660,7 @@ unsafe fn settle(
                 return Err(malformed(
                     plugin,
                     format!("returned unknown verdict {other}"),
-                ))
+                ));
             }
         }
         keep_flags.push(*verdict != MQB_MESSAGE_DROPPED);
@@ -958,8 +958,8 @@ mod tests {
     use super::*;
     use crate::extensions::get_middleware_factory;
     use crate::plugin::sdk::{
-        build_vtable, BatchFilter, ExportedVTable, MessageRef, MiddlewareFactory, NoEndpoint,
-        Verdict, CAPABILITIES_MIDDLEWARE_ONLY,
+        BatchFilter, CAPABILITIES_MIDDLEWARE_ONLY, ExportedVTable, MessageRef, MiddlewareFactory,
+        NoEndpoint, Verdict, build_vtable,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 

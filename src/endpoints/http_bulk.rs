@@ -18,11 +18,12 @@ mod publisher;
 mod query;
 mod stream_query;
 pub use crate::models::{
-    ElasticsearchConfig, ElasticsearchMode, MeilisearchConfig, OpenAiChatConfig,
-    OpenAiEmbeddingsConfig, QdrantConfig, TypesenseConfig,
+    ElasticsearchConfig, ElasticsearchMode, LlmAgentConfig, LlmAnswer, LlmHostedAgentConfig,
+    LlmHostedMcpServer, LlmHostedProvider, LlmMcpServer, LlmProvider, LlmTool, MeilisearchConfig,
+    OpenAiChatConfig, OpenAiEmbeddingsConfig, QdrantConfig, TypesenseConfig,
 };
-pub(crate) use consumer::cursor_checkpoint;
 pub use consumer::HttpBulkConsumer;
+pub(crate) use consumer::cursor_checkpoint;
 pub(crate) use presets::builtin as builtin_preset;
 pub use presets::{
     base_url as preset_base_url, named_endpoint, preset_names, register_preset,
@@ -32,7 +33,7 @@ pub use publisher::HttpBulkPublisher;
 pub(crate) use stream_query::StreamQueryPublisher;
 
 use crate::models::HttpBulkConfig;
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use std::time::Duration;
 use tracing::warn;
@@ -199,6 +200,12 @@ mod tests {
         }
     }
 
+    /// `llm_agent` is no `http_bulk` configuration: its fields and tool endpoints are checked.
+    fn agent(page: &str, config: &Value) {
+        serde_json::from_value::<crate::models::LlmAgentConfig>(config.clone())
+            .unwrap_or_else(|error| panic!("{page}: {error}"));
+    }
+
     #[test]
     fn the_recipes_in_the_book_are_valid_configurations() {
         let book = concat!(env!("CARGO_MANIFEST_DIR"), "/docs/book/connectors/");
@@ -208,7 +215,7 @@ mod tests {
             ("elasticsearch.md", 2),
             ("postgrest.md", 2),
             ("qdrant.md", 2),
-            ("openai.md", 8),
+            ("openai.md", 10),
             ("../cookbook/llm.md", 5),
         ] {
             // The book is not part of the published crate.
@@ -249,11 +256,19 @@ mod tests {
                     &output["switch"]["cases"]["delete"],
                 ]);
                 for (preset, config) in asked.filter_map(named) {
+                    if preset == "llm_agent" {
+                        agent(name, config);
+                        continue;
+                    }
                     let config = presets::resolve(preset, config)
                         .unwrap_or_else(|error| panic!("{name}: {error:#}"));
                     valid(&config).unwrap_or_else(|error| panic!("{name}: {error}"));
                 }
                 let config = match (named(output), output.get("http_bulk")) {
+                    (Some(("llm_agent", config)), _) => {
+                        agent(name, config);
+                        continue;
+                    }
                     (Some((preset, config)), _) => presets::resolve(preset, config),
                     (None, Some(config)) => {
                         serde_json::from_value(config.clone()).map_err(Into::into)

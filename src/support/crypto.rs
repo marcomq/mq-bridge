@@ -29,10 +29,10 @@
 
 use crate::models::{CipherKind, EncryptionConfig};
 use aes_gcm::Aes256Gcm;
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use base64::Engine as _;
-use chacha20poly1305::aead::{Aead, AeadInOut, KeyInit, Payload};
 use chacha20poly1305::XChaCha20Poly1305;
+use chacha20poly1305::aead::{Aead, AeadInOut, KeyInit, Payload};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use zeroize::Zeroizing;
@@ -446,9 +446,11 @@ mod tests {
 
         let mut uncovered = meta.clone();
         uncovered.insert("trace".to_string(), "t2".to_string());
-        assert!(crypto
-            .open(&envelope, &crypto.metadata_aad(&uncovered))
-            .is_ok());
+        assert!(
+            crypto
+                .open(&envelope, &crypto.metadata_aad(&uncovered))
+                .is_ok()
+        );
 
         for tamper in [
             |m: &mut HashMap<String, String>| {
@@ -465,9 +467,11 @@ mod tests {
         ] {
             let mut tampered = meta.clone();
             tamper(&mut tampered);
-            assert!(crypto
-                .open(&envelope, &crypto.metadata_aad(&tampered))
-                .is_err());
+            assert!(
+                crypto
+                    .open(&envelope, &crypto.metadata_aad(&tampered))
+                    .is_err()
+            );
         }
     }
 

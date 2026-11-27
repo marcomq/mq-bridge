@@ -444,7 +444,7 @@ const tlsBaseRenderer = {
       return renderObject(renderContext, node, elementId, false, dataPath);
     }
 
-    const valuePath = [...dataPath, "required"];
+    const valuePath = [...toStorePath(dataPath), "required"];
     const checkboxId = `${elementId}.required`;
     const currentValue = Boolean(context.store.getPath(valuePath) ?? requiredNode.defaultValue);
 
@@ -574,36 +574,8 @@ if (!(window as any)._mqb_array_item_name_sync_installed) {
   }
 }
 
-function fixNullBooleans(node: SchemaNode, dataPath: Array<string | number>, context: RendererContext) {
-  if (!node.properties) return;
-  const store = context.store;
-  const data = store.getPath(dataPath);
-
-  if (!data || typeof data !== "object") return;
-
-  const hasNullBooleans = Object.entries(node.properties as Record<string, SchemaNode>).some(([key, prop]) => prop?.type === "boolean" && data[key] === null);
-  if (!hasNullBooleans) return;
-
-  window.setTimeout(() => {
-    const currentData = { ...(store.getPath(dataPath) || {}) };
-    let changed = false;
-
-    for (const [key, prop] of Object.entries(node.properties as Record<string, SchemaNode>)) {
-      if (prop?.type === "boolean" && currentData[key] === null) {
-        currentData[key] = false;
-        changed = true;
-      }
-    }
-
-    if (changed) {
-      store.setPath(dataPath, currentData);
-    }
-  }, 0);
-}
-
 const tlsRenderer = {
   render: (node: SchemaNode, path: string, elementId: string, dataPath: Array<string | number>, context: RendererContext) => {
-    fixNullBooleans(node, dataPath, context);
     const element = tlsBaseRenderer.render(node, path, elementId, dataPath, context) as HTMLElement;
     element?.classList?.add("ui_tls");
     return element;
@@ -783,8 +755,6 @@ domRenderer.renderAdditionalPropertyRow = (
 
 const createEndpointRenderer = (type: string) => ({
   render: (node: SchemaNode, _path: string, elementId: string, dataPath: Array<string | number>, context: RendererContext) => {
-    fixNullBooleans(node, dataPath, context);
-
     const basicFields = BASIC_ENDPOINT_FIELDS[type] || [];
     const allProperties = node.properties || {};
     if (type === "file" && allProperties.path) {

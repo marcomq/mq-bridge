@@ -4,7 +4,7 @@
 //  git clone https://github.com/marcomq/mq-bridge
 
 use crate::CanonicalMessage;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 
 /// Transport URL scheme and path information

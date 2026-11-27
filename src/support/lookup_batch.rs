@@ -193,7 +193,9 @@ fn column_before_in(text: &str) -> anyhow::Result<String> {
         .unwrap_or_default()
         .trim_matches(|c| "\"`[]".contains(c));
     if column.is_empty() || column.eq_ignore_ascii_case("not") {
-        bail!("the list form needs a plain column left of `IN (…)`, e.g. `WHERE id IN (${{payload:id}})`");
+        bail!(
+            "the list form needs a plain column left of `IN (…)`, e.g. `WHERE id IN (${{payload:id}})`"
+        );
     }
     Ok(column.to_string())
 }
@@ -248,7 +250,9 @@ pub(crate) fn parse_sql(sql: &str) -> anyhow::Result<Option<ListQuery>> {
         );
     }
     if has_plain_limit(sql) {
-        bail!("drop `LIMIT` from a lookup query with `IN (${{…}})`: it would cap the whole batch, not each key");
+        bail!(
+            "drop `LIMIT` from a lookup query with `IN (${{…}})`: it would cap the whole batch, not each key"
+        );
     }
     Ok(Some(ListQuery {
         key: column_before_in(&sql[..open])?,

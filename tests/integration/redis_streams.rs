@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use mq_bridge::endpoints::redis_streams::{RedisStreamsConsumer, RedisStreamsPublisher};
 use mq_bridge::test_utils::{
-    run_performance_pipeline_test, run_test_with_docker, run_test_with_docker_controller,
-    setup_logging, verify_subscriber_logic, PERF_TEST_MESSAGE_COUNT,
+    PERF_TEST_MESSAGE_COUNT, run_performance_pipeline_test, run_test_with_docker,
+    run_test_with_docker_controller, setup_logging, verify_subscriber_logic,
 };
 
 const COMPOSE: &str = "tests/integration/docker-compose/redis.yml";
@@ -75,7 +75,7 @@ pub async fn test_redis_performance_pipeline() {
 
 pub async fn test_redis_status() {
     use mq_bridge::traits::{MessageConsumer, MessagePublisher};
-    use tokio::time::{sleep, Duration};
+    use tokio::time::{Duration, sleep};
 
     setup_logging();
     run_test_with_docker_controller(COMPOSE, |controller| async move {

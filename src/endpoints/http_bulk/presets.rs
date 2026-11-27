@@ -6,6 +6,11 @@
 //! Named endpoints that are an `http_bulk` configuration: a few fields and a
 //! URI of their own, and the generic publisher underneath.
 
+#[cfg(feature = "llm-agent")]
+mod llm_agent;
+mod llm_hosted_agent;
+
+use super::query::INPUT_COUNT;
 use super::stream_query::StreamQueryPublisher;
 use super::{HttpBulkConsumer, HttpBulkPublisher};
 use crate::errors::InvalidConfig;
@@ -14,10 +19,10 @@ use crate::models::{
     OpenAiChatConfig, OpenAiEmbeddingsConfig, QdrantConfig, TypesenseConfig,
 };
 use crate::traits::{CustomEndpointFactory, MessageConsumer, MessagePublisher};
-use anyhow::{anyhow, bail, Context};
+use anyhow::{Context, anyhow, bail};
 use async_trait::async_trait;
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 /// One named endpoint: the schema it shows and how its config becomes `http_bulk`.
@@ -30,11 +35,16 @@ struct Preset {
     resolve: fn(&str, &Value) -> anyhow::Result<Value>,
 }
 
-const PRESETS: [Preset; 6] = [
+const PRESETS: [Preset; 7] = [
     Preset {
         name: "elasticsearch",
         schema: derived::<ElasticsearchConfig>(),
         resolve: elasticsearch,
+    },
+    Preset {
+        name: "llm_hosted_agent",
+        schema: derived::<crate::models::LlmHostedAgentConfig>(),
+        resolve: llm_hosted_agent::resolve,
     },
     Preset {
         name: "meilisearch",
@@ -63,18 +73,24 @@ const PRESETS: [Preset; 6] = [
     },
 ];
 
+/// Named endpoints that are not one `http_bulk` configuration, but run on one.
+const OWN_FACTORIES: &[&str] = &[
+    #[cfg(feature = "llm-agent")]
+    "llm_agent",
+];
+
 /// The endpoint names [`register_preset`] accepts.
 pub fn preset_names() -> impl Iterator<Item = &'static str> {
-    PRESETS.iter().map(|preset| preset.name)
+    PRESETS
+        .iter()
+        .map(|preset| preset.name)
+        .chain(OWN_FACTORIES.iter().copied())
 }
 
 /// Registers the named endpoint, e.g. `typesense`, as a custom endpoint factory.
 pub fn register_preset(name: &str) -> anyhow::Result<()> {
-    let preset = PRESETS
-        .into_iter()
-        .find(|preset| preset.name == name)
-        .ok_or_else(|| anyhow!("no http_bulk preset is named `{name}`"))?;
-    crate::extensions::register_endpoint_factory(name, Arc::new(preset))
+    let factory = builtin(name).ok_or_else(|| anyhow!("no http_bulk preset is named `{name}`"))?;
+    crate::extensions::register_endpoint_factory(name, factory)
 }
 
 /// Registers a named endpoint of your own as a custom endpoint factory.
@@ -96,6 +112,10 @@ pub fn register_preset_with(
 
 /// The built-in named endpoint, for a route that names one nobody registered.
 pub(crate) fn builtin(name: &str) -> Option<Arc<dyn CustomEndpointFactory>> {
+    #[cfg(feature = "llm-agent")]
+    if name == "llm_agent" {
+        return Some(Arc::new(llm_agent::LlmAgentFactory));
+    }
     let preset = PRESETS.into_iter().find(|preset| preset.name == name)?;
     Some(Arc::new(preset))
 }
@@ -175,7 +195,13 @@ impl CustomEndpointFactory for Preset {
                 StreamQueryPublisher::new(route_name, &resolved).await?,
             ));
         }
-        Ok(Box::new(HttpBulkPublisher::new(&resolved)?))
+        let publisher = HttpBulkPublisher::new(&resolved)?;
+        if self.name == "llm_hosted_agent" {
+            return Ok(Box::new(llm_hosted_agent::LlmHostedAgentPublisher::new(
+                publisher, config,
+            )?));
+        }
+        Ok(Box::new(publisher))
     }
 
     fn config_schema(&self) -> Option<Value> {
@@ -200,7 +226,9 @@ pub fn base_url(name: &str, url: &str) -> anyhow::Result<String> {
 pub fn segment<'a>(field: &str, name: &'a str) -> anyhow::Result<&'a str> {
     let reserved = ['/', '?', '#', '&', '%', '{', '}', ' '];
     if name.is_empty() || name == "." || name == ".." || name.contains(reserved) {
-        bail!("'{field}' must be one name without '/', '?', '#', '&', '%', braces or spaces, got '{name}'");
+        bail!(
+            "'{field}' must be one name without '/', '?', '#', '&', '%', braces or spaces, got '{name}'"
+        );
     }
     Ok(name)
 }
@@ -471,6 +499,8 @@ fn qdrant(_route: &str, value: &Value) -> anyhow::Result<Value> {
 }
 
 const OPENAI_URL: &str = "https://api.openai.com/v1";
+/// OpenAI refuses `json_object` output unless the conversation mentions JSON.
+const JSON_HINT: &str = "Answer with a JSON object.";
 
 /// The API's base URL; one without a path gets `/v1`, which every compatible server uses.
 fn openai_url(name: &str, url: Option<&str>) -> anyhow::Result<String> {
@@ -554,14 +584,24 @@ fn openai_chat(_route: &str, value: &Value) -> anyhow::Result<Value> {
     {
         bail!("'options' cannot set '{field}'");
     }
-    if config.json && !body.contains_key("response_format") {
+    // A bundle sets its own format unless `options` gives one.
+    let json_object = config.json
+        && config.messages_per_request.is_none()
+        && !body.contains_key("response_format");
+    if json_object {
         body.insert("response_format".into(), json!({"type": "json_object"}));
     }
     body.insert("model".into(), json!(config.model));
     if streams {
         body.insert("stream".into(), json!(true));
     }
-    let system = config.system.as_deref();
+    // `json_object` needs the word JSON in the messages; a payload brings its own.
+    let system = match (json_object && !config.messages_from_payload, config.system) {
+        (true, Some(system)) => Some(format!("{system}\n{JSON_HINT}")),
+        (true, None) => Some(JSON_HINT.to_string()),
+        (false, system) => system,
+    };
+    let system = system.as_deref();
     let query = match config.messages_per_request {
         Some(0) => bail!("'messages_per_request' must be at least 1"),
         Some(count) => bundled_chat(body, system, &config.prompt, config.json, count)?,
@@ -617,10 +657,15 @@ fn openai_chat(_route: &str, value: &Value) -> anyhow::Result<Value> {
     with_tls(resolved, config.tls)
 }
 
+/// Holds the model to one numbered entry per input. Ollama sorts schema keys, so the
+/// answer field must sort after `n`, or the model writes it before its number.
+const ANSWERS_FORMAT: &str = r#"{"type":"json_schema","json_schema":{"name":"answers","schema":{"type":"object","properties":{"answers":{"type":"array","minItems":COUNT,"maxItems":COUNT,"items":{"type":"object","properties":{"n":{"type":"integer"},"result":{"type":"KIND"}},"required":["n","result"]}}},"required":["answers"]}}}"#;
+
 /// What a bundled request adds to the system message.
 const BUNDLED: &str = "The user message holds numbered inputs; each starts with its number and \
-    a colon. Treat every input on its own. Answer with one JSON object \
-    {\"answers\": [{\"n\": 1, \"answer\": ...}, ...]} that has exactly one entry per input; \
+    a colon. Treat every input on its own. Any answer format asked for above applies to each \
+    single answer. The whole response is one JSON object \
+    {\"answers\": [{\"n\": 1, \"result\": ...}, ...]} that has exactly one entry per input; \
     \"n\" is the number of the input.";
 
 /// The query that sends `count` messages as numbered inputs of one completion.
@@ -632,6 +677,7 @@ fn bundled_chat(
     count: usize,
 ) -> anyhow::Result<Value> {
     const REQUESTS: &str = "{requests}";
+    const FORMAT: &str = "{answers_format}";
     // The system message is sent once per request, so it has no message to read from.
     if system.is_some_and(|system| system.contains("${") || system.contains(REQUESTS)) {
         bail!("'system' cannot hold '${{…}}' or '{REQUESTS}' with 'messages_per_request'");
@@ -640,13 +686,12 @@ fn bundled_chat(
         bail!("'prompt' cannot hold '{{index}}' with 'messages_per_request'");
     }
     let entry = match json {
-        true => "Each \"answer\" is the JSON object that answers its input.",
-        false => "Each \"answer\" is a string, the answer to its input.",
+        true => "Each \"result\" is the JSON object that answers its input.",
+        false => "Each \"result\" is a string, the answer to its input.",
     };
-    let system = [system.unwrap_or_default(), BUNDLED, entry].join("\n");
-    // The answers arrive as one JSON object whatever a single answer is.
-    body.entry("response_format")
-        .or_insert_with(|| json!({"type": "json_object"}));
+    let field = answer_field(body.get("response_format"));
+    let rules = format!("{BUNDLED}\n{entry}").replace("\"result\"", &format!("\"{field}\""));
+    let system = [system.unwrap_or_default(), &rules].join("\n");
     body.insert(
         "messages".into(),
         json!([
@@ -654,20 +699,75 @@ fn bundled_chat(
             {"role": "user", "content": REQUESTS}
         ]),
     );
-    let envelope = Value::Object(body).to_string();
+    // A `system` that names one answer's format wins. Set after `messages`, so the
+    // count is in the part of the envelope closed last.
+    if !body.contains_key("response_format") {
+        body.insert("response_format".into(), json!(FORMAT));
+    }
+    let answers_format = ANSWERS_FORMAT
+        .replace("COUNT", INPUT_COUNT)
+        .replace("KIND", if json { "object" } else { "string" });
+    // Only the placeholders this function inserted; `options` text may hold the same words.
+    let mut envelope = Value::Object(body).to_string();
+    for (placeholder, value) in [
+        (
+            format!(r#""content":"{REQUESTS}""#),
+            format!(r#""content":{REQUESTS}"#),
+        ),
+        (
+            format!(r#""response_format":"{FORMAT}""#),
+            format!(r#""response_format":{answers_format}"#),
+        ),
+    ] {
+        if let Some(at) = envelope.rfind(&placeholder) {
+            envelope.replace_range(at..at + placeholder.len(), &value);
+        }
+    }
     Ok(json!({
         "path": "/chat/completions",
         "format": "json_array",
         "request": json!({"type": "text", "text": format!("{{index}}: {prompt}")}).to_string(),
-        "envelope": envelope.replace(&format!("\"{REQUESTS}\""), REQUESTS),
+        "envelope": envelope,
         "max_messages": count,
         "responses_text": "/choices/0/message/content",
         "responses": "/answers",
         "index": "/n",
-        "value": "/answer",
+        "value": format!("/{field}"),
         "stop_reason": "/choices/0/finish_reason",
         "split_on_reject": true
     }))
+}
+
+/// `answer` for a custom schema written before the bundle's field became `result`.
+fn answer_field(format: Option<&Value>) -> &'static str {
+    let entry = format
+        .and_then(|format| format.pointer("/json_schema/schema"))
+        .and_then(|schema| {
+            let answers = local_schema(schema, schema.pointer("/properties/answers")?)?;
+            local_schema(schema, answers.get("items")?)
+        });
+    let required = |field: &str| {
+        let required = entry.and_then(|entry| entry.get("required")?.as_array());
+        required.is_some_and(|names| names.iter().any(|name| name == field))
+    };
+    let declared = |field: &str| entry.and_then(|entry| entry.get("properties")?.get(field));
+    match (required("answer"), required("result")) {
+        (true, false) => "answer",
+        (_, true) => "result",
+        _ if declared("answer").is_some() && declared("result").is_none() => "answer",
+        _ => "result",
+    }
+}
+
+/// `node`, or what its local `$ref` points to. `None` for a dangling or circular `$ref`.
+fn local_schema<'a>(root: &'a Value, mut node: &'a Value) -> Option<&'a Value> {
+    for _ in 0..8 {
+        let Some(target) = node.get("$ref").and_then(Value::as_str) else {
+            return Some(node);
+        };
+        node = root.pointer(target.strip_prefix('#')?)?;
+    }
+    None
 }
 
 #[cfg(all(test, feature = "plugin", feature = "test-utils"))]
@@ -700,8 +800,22 @@ mod tests {
         };
         assert_eq!((name.as_str(), config), ("acme", json!({"a": 1})));
     }
-    use crate::plugin::test_support::StubHttpServer;
     use crate::CanonicalMessage;
+    use crate::plugin::test_support::StubHttpServer;
+
+    #[test]
+    fn the_answer_field_is_found_through_a_schema_ref() {
+        let format = |entry: Value| {
+            json!({"json_schema": {"schema": {
+                "$defs": {"Entry": {"properties": entry}},
+                "properties": {"answers": {"items": {"$ref": "#/$defs/Entry"}}}
+            }}})
+        };
+        let answer = format(json!({"n": {}, "answer": {}}));
+        assert_eq!(answer_field(Some(&answer)), "answer");
+        let result = format(json!({"n": {}, "result": {}}));
+        assert_eq!(answer_field(Some(&result)), "result");
+    }
 
     fn preset(name: &str) -> Preset {
         PRESETS
@@ -731,6 +845,7 @@ mod tests {
             ("qdrant", json!({"collection": "books"})),
             ("openai_chat", json!({"model": "m", "prompt": "p"})),
             ("openai_embeddings", json!({"model": "m", "input": "i"})),
+            ("llm_hosted_agent", json!({"model": "m", "prompt": "p"})),
         ] {
             // A scheme cannot hold `_`, so the URI of `openai_embeddings` spells it with `-`.
             let scheme = name.replace('_', "-");
@@ -925,6 +1040,23 @@ mod tests {
                 json!({"model": "m", "prompt": "p", "concurrency": 0}),
             ),
             ("openai_embeddings", json!({"model": "m"})),
+            ("llm_hosted_agent", json!({"model": "m"})),
+            (
+                "llm_hosted_agent",
+                json!({"model": "m", "prompt": "p", "options": {"input": "x"}}),
+            ),
+            (
+                "llm_hosted_agent",
+                json!({"model": "m", "prompt": "p", "provider": "anthropic", "options": {"system": "x"}}),
+            ),
+            (
+                "llm_hosted_agent",
+                json!({"model": "m", "prompt": "p", "options": {"tools": {}}}),
+            ),
+            (
+                "llm_hosted_agent",
+                json!({"model": "m", "prompt": "p", "provider": "bedrock"}),
+            ),
             (
                 "openai_embeddings",
                 json!({"model": "m", "input": "i", "url": "ftp://h"}),
@@ -974,7 +1106,7 @@ mod tests {
     #[tokio::test]
     async fn every_preset_declares_a_uri_and_only_two_are_inputs() {
         for name in preset_names() {
-            let preset = preset(name);
+            let preset = builtin(name).expect("built in");
             #[cfg(feature = "schema")]
             {
                 let schema = preset.config_schema().expect("schema");
@@ -985,7 +1117,7 @@ mod tests {
             }
             let config = match name {
                 "typesense" | "qdrant" => json!({"url": "http://localhost:1", "collection": "a"}),
-                "openai_chat" => json!({"model": "m", "prompt": "p"}),
+                "openai_chat" | "llm_hosted_agent" => json!({"model": "m", "prompt": "p"}),
                 "openai_embeddings" => json!({"model": "m", "input": "i"}),
                 _ => json!({"url": "http://localhost:1", "index": "a"}),
             };
@@ -1291,7 +1423,7 @@ mod tests {
             .iter()
             .map(|text| {
                 let (number, text) = text.split_once(": Text: ").unwrap();
-                json!({"n": number.parse::<u64>().unwrap(), "answer": text.to_uppercase()})
+                json!({"n": number.parse::<u64>().unwrap(), "result": text.to_uppercase()})
             })
             .rev()
             .collect();
@@ -1341,7 +1473,9 @@ mod tests {
         let sent = calls(&server);
         assert_eq!(sent.len(), 2);
         let body: Value = serde_json::from_str(&sent[0].2).unwrap();
-        assert_eq!(body["response_format"], json!({"type": "json_object"}));
+        let schema = &body["response_format"]["json_schema"]["schema"];
+        assert_eq!(schema["properties"]["answers"]["minItems"], 2);
+        assert_eq!(schema["properties"]["answers"]["maxItems"], 2);
         let system = body["messages"][0]["content"].as_str().unwrap();
         assert!(system.starts_with("Shout.\nThe user message holds numbered inputs"));
         assert_eq!(
@@ -1382,8 +1516,9 @@ mod tests {
     async fn openai_chat_halves_a_bundle_until_the_bad_message_stands_alone() {
         // (inputs, answers, reason of the one failure, requests sent)
         for (inputs, answered, reason, requests) in [
-            // Too few entries, a number twice, a number nobody has: nothing can be matched.
-            (vec!["a", "lost", "c", "d"], 4, None, 5),
+            // A lost entry is asked for alone; the answers that came back are kept.
+            (vec!["a", "lost", "c", "d"], 4, None, 2),
+            // A number twice or a number nobody has: nothing can be matched.
             (vec!["a", "twice", "c", "d"], 4, None, 5),
             (vec!["a", "stranger", "c", "d"], 4, None, 5),
             // Refused for its size, cut off, or declined: only that message fails.
@@ -1456,6 +1591,85 @@ mod tests {
         );
         // Neither halves nor the bundle after it.
         assert_eq!(calls(&server).len(), 1);
+    }
+
+    fn chat_answer(answers: Vec<Value>) -> (u16, String) {
+        let content = json!({"answers": answers}).to_string();
+        let choice = json!({"message": {"content": content}, "finish_reason": "stop"});
+        (200, json!({"choices": [choice]}).to_string())
+    }
+
+    fn inputs(request: &crate::plugin::test_support::StubRequest) -> usize {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        body["messages"][1]["content"].as_array().unwrap().len()
+    }
+
+    #[tokio::test]
+    async fn openai_chat_reads_the_answer_field_of_a_custom_schema() {
+        let server = StubHttpServer::start(|request| {
+            let answers = (1..=inputs(request))
+                .map(|n| json!({"n": n, "answer": format!("a{n}")}))
+                .collect();
+            chat_answer(answers)
+        })
+        .await
+        .expect("stub server");
+        let entry = json!({"type": "object", "required": ["n", "answer"], "properties": {
+            "n": {"type": "integer"}, "answer": {"type": "string"}
+        }});
+        let schema = json!({"type": "object", "properties": {
+            "answers": {"type": "array", "items": entry}
+        }});
+        let config = json!({
+            "url": server.url(), "model": "m", "prompt": "Text: ${payload:body}",
+            "messages_per_request": 2, "concurrency": 1,
+            "options": {"response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "custom", "schema": schema}
+            }}
+        });
+        let publisher = preset("openai_chat")
+            .create_publisher("route", &config)
+            .await
+            .unwrap();
+        let answers = publisher.lookup_batch(&rows(&["x", "y"])).await;
+        assert_eq!(
+            answers.unwrap().unwrap(),
+            vec![Some(json!("a1")), Some(json!("a2"))]
+        );
+        let body: Value = serde_json::from_str(&calls(&server)[0].2).unwrap();
+        let system = body["messages"][0]["content"].as_str().unwrap();
+        assert!(system.contains("\"answer\": ..."), "{system}");
+    }
+
+    #[tokio::test]
+    async fn openai_chat_asks_again_for_an_entry_without_its_value() {
+        let server = StubHttpServer::start(|request| {
+            let count = inputs(request);
+            let answers = (1..=count)
+                .map(|n| match count > 1 && n == 2 {
+                    true => json!({"n": n}),
+                    false => json!({"n": n, "result": "ok"}),
+                })
+                .collect();
+            chat_answer(answers)
+        })
+        .await
+        .expect("stub server");
+        let config = json!({
+            "url": server.url(), "model": "m", "prompt": "Text: ${payload:body}",
+            "messages_per_request": 2, "concurrency": 1
+        });
+        let publisher = preset("openai_chat")
+            .create_publisher("route", &config)
+            .await
+            .unwrap();
+        let answers = publisher.lookup_batch(&rows(&["x", "y"])).await;
+        assert_eq!(
+            answers.unwrap().unwrap(),
+            vec![Some(json!("ok")), Some(json!("ok"))]
+        );
+        assert_eq!(calls(&server).len(), 2);
     }
 
     #[test]

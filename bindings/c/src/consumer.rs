@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 use std::ffi::c_char;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use anyhow::anyhow;
