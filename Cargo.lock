@@ -64,7 +64,6 @@ checksum = "54dae3d1d7b8956f3506c4e999a74e77f932a59153ccf38ab8cf96db74bb9dc0"
 dependencies = [
  "cfg-if",
  "const-random",
- "getrandom 0.3.4",
  "getrandom 0.4.3",
  "once_cell",
  "serde",
@@ -4341,9 +4340,9 @@ dependencies = [
 
 [[package]]
 name = "omq-proto"
-version = "0.41.3"
+version = "0.42.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23f1b677f786a1a60d35a3e2f90a6140bb8929b4dfda3c2f527faa7710f3f3a5"
+checksum = "8de42c72d1af77214e0b5eeab072fed7cda19ffaa12a3dd0071fc54db4046de4"
 dependencies = [
  "bytes",
  "concurrent-queue",
@@ -4357,9 +4356,9 @@ dependencies = [
 
 [[package]]
 name = "omq-shm"
-version = "0.9.1"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d8622eead4af01739312de626e7ca15b77d46691a513a5c032b3c049f34faddf"
+checksum = "d5348117bf44bbc63ca264cebd02fc5a1438c0f09b354784da7692ecf2c1d941"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -4371,9 +4370,9 @@ dependencies = [
 
 [[package]]
 name = "omq-tokio"
-version = "0.38.3"
+version = "0.39.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b235a0de3e07b493b559b962c720fb3368d76f4316e36ffd5507f0161babc5c"
+checksum = "682d03a33f442e03bec9166b35adbb8ab28b98a633a13ac37727a4b42dbc13f1"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -7043,7 +7042,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

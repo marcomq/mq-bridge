@@ -70,7 +70,7 @@ All notable changes to `mq-bridge`. Newest first.
   be linked. A project whose `Cargo.lock` still pins rdkafka-sys 4.10 fails to resolve
   ("failed to select a version for `rdkafka-sys`") when it upgrades mq-bridge; run
   `cargo update -p rdkafka-sys` first (likewise `cargo update -p uuid` for apache-avro's
-  uuid 1.29 floor), or plain `cargo update`. Also bumps async-nats 0.53, apache-avro 0.23 and omq-tokio 0.38. async-nats
+  uuid 1.29 floor), or plain `cargo update`. Also bumps async-nats 0.53, apache-avro 0.23 and omq-tokio 0.39. async-nats
   now refuses a server that offers no TLS when `tls.required` is set, before the handshake
   instead of during it. The re-export `mq_bridge::async_nats` follows: code that mixes it
   with its own `async-nats = "0.52"` must move to 0.53 as well.

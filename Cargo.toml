@@ -118,7 +118,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "ti
 # The crate MSRV is 1.91 (amq-protocol 10.8+ with `amqp`); these features need more:
 # - "aws" (aws-sdk-*) requires Rust 1.94.1, and so does "full".
 # - "sqlx" and "postgres-cdc" (sqlx 0.9) require Rust 1.94.
-# - "zeromq-omq" (omq 0.33) requires Rust 1.93.
+# - "zeromq-omq" (omq-tokio 0.39) requires Rust 1.93.
 async-trait.workspace = true
 serde_json.workspace = true
 thiserror = "2.0"
@@ -278,7 +278,7 @@ zeromq = { version = "0.7", optional = true }
 # Default ZeroMQ backend (`backend: try_omq`). Faster than libzmq per its
 # benchmarks and adds CURVE/PLAIN security. Pure Rust without default
 # features; needs MSRV 1.93 / edition 2024.
-omq-tokio = { version = "0.38", optional = true }
+omq-tokio = { version = "0.39", optional = true }
 
 # Redis Streams. Pure-Rust client (no C bindings). TLS via rustls (ring), so
 # `rediss://` URLs work; webpki-roots ships the CA bundle so there's no system

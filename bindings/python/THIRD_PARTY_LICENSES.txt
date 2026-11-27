@@ -1645,17 +1645,17 @@ License: MIT OR Apache-2.0
 Source: https://github.com/rusticata/oid-registry.git
 Copyright/attribution: Copyright (c) 2017 Pierre Chifflier
 
-omq-proto@0.26.1
+omq-proto@0.42.2
 License: ISC
 Source: https://github.com/paddor/omq.rs
 Copyright/attribution: Copyright (c) 2026 Patrik Wenger
 
-omq-shm@0.2.3
+omq-shm@0.10.2
 License: ISC
 Source: https://github.com/paddor/omq.rs
 Copyright/attribution: Copyright (c) 2026 Patrik Wenger
 
-omq-tokio@0.21.4
+omq-tokio@0.39.2
 License: ISC
 Source: https://github.com/paddor/omq.rs
 Copyright/attribution: Copyright (c) 2026 Patrik Wenger
