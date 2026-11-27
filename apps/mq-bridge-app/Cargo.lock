@@ -4716,7 +4716,7 @@ dependencies = [
  "prost-types 0.14.4",
  "protoc-bin-vendored",
  "rand 0.10.3",
- "rdkafka",
+ "rdkafka 0.39.0",
  "redis",
  "reqwest",
  "rmcp",
@@ -4808,7 +4808,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "percent-encoding",
- "rdkafka",
+ "rdkafka 0.40.0",
  "rust-embed",
  "rustls",
  "schemars 1.2.3",
@@ -6829,10 +6829,28 @@ dependencies = [
 ]
 
 [[package]]
-name = "rdkafka-sys"
-version = "4.10.0+2.12.1"
+name = "rdkafka"
+version = "0.40.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e234cf318915c1059d4921ef7f75616b5219b10b46e9f3a511a15eb4b56a3f77"
+checksum = "41efe6cce81066ae2e5ece4b64e8eee0602ef0f757506a04c0731c17d9dbd04f"
+dependencies = [
+ "futures-channel",
+ "futures-util",
+ "libc",
+ "log",
+ "rdkafka-sys",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "slab",
+ "tokio",
+]
+
+[[package]]
+name = "rdkafka-sys"
+version = "4.11.0+2.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3d6665101ead1a55f2fc23e66df201c5ab60cd52718a73af266155ac59f43c2"
 dependencies = [
  "cmake",
  "libc",

@@ -176,7 +176,7 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"], optio
 # --- Optional Endpoint Dependencies ---
 
 # Kafka
-rdkafka = { version = "0.39", default-features = false, features = ["tokio"], optional = true }
+rdkafka = { version = "0.40", default-features = false, features = ["tokio"], optional = true }
 
 # AMQP (RabbitMQ).
 # Drop lapin's defaults so the crypto provider remains wired through
